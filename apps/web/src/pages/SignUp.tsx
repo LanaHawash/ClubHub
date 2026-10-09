@@ -1,14 +1,24 @@
 import { useState } from 'react'
-import { ArrowRight } from 'lucide-react'
+import { ArrowRight, ArrowLeft } from 'lucide-react'
 type SignUpProps = {
   onSignIn: () => void
   onContinue: (email: string) => void
+  onHome: () => void
 }
 
-export default function SignUp({ onSignIn, onContinue }: SignUpProps) {
+export default function SignUp({ onSignIn, onContinue, onHome }: SignUpProps) {
   const [email, setEmail] = useState('')
   return (
     <>
+    <button
+      type="button"
+      onClick={onHome}
+      className="mb-10 inline-flex items-center gap-2 text-sm text-ink-2 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum"
+    >
+      <ArrowLeft size={16} aria-hidden="true" />
+      Back to the hub
+    </button>
+
       <p className="mb-3 font-mono text-xs uppercase tracking-[0.2em] text-rose">
         Student registration · step 1 of 3
       </p>

@@ -4,11 +4,13 @@ import { Eye, EyeOff, KeyRound,ArrowRight,GraduationCap,ArrowLeft } from 'lucide
 type CreatePasswordProps = {
   email: string
   onSignIn: () => void
+  onHome: () => void
 }
 
 export default function CreatePassword({
   email,
   onSignIn,
+  onHome
 }: CreatePasswordProps) {
   const [password, setPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
@@ -23,10 +25,9 @@ export default function CreatePassword({
     <>
       <button
         type="button"
-        disabled
+        onClick={onHome}
         title="The hub page is not connected yet"
-        className="mb-6 inline-flex items-center gap-2 text-sm text-ink-2 transition-colors enabled:hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum disabled:cursor-not-allowed disabled:opacity-60"
-      >
+        className="mb-6 inline-flex items-center gap-2 text-sm text-ink-2 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum"      >
         <ArrowLeft size={16} aria-hidden="true" />
         Back to the hub
       </button>

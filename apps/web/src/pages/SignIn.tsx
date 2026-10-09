@@ -1,15 +1,24 @@
 import { useState } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
-import { ArrowRight } from 'lucide-react'
+import { ArrowRight, ArrowLeft } from 'lucide-react'
         type SignInProps = {
         onSignUp: () => void
         onForgotPassword?: () => void
+        onHome: () => void
         }
 
-export default function SignIn({ onSignUp, onForgotPassword }: SignInProps) {
+export default function SignIn({ onSignUp, onForgotPassword, onHome, }: SignInProps) {
     const [showPassword, setShowPassword] = useState(false)
 return (
     <>
+            <button
+        type="button"
+        onClick={onHome}
+        className="mb-10 inline-flex items-center gap-2 text-sm text-ink-2 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum"
+        >
+        <ArrowLeft size={16} aria-hidden="true" />
+        Back to the hub
+        </button>
       <p className="mb-3 text-sm font-semibold text-rose">
          Sign In Page
         </p>

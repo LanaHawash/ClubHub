@@ -5,15 +5,20 @@ import CreatePassword from './pages/CreatePassword'
 import AuthLayout from './components/AuthLayout'
 import ForgotPassword from './pages/ForgotPassword'
 import VerifyEmail from './pages/VerifyEmail'
+import Home from './pages/Home'
 
-type Page = 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
+type Page = 'home' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
 
 function App() {
   const [registrationEmail, setRegistrationEmail] = useState('')
-  const [page, setPage] = useState<Page>('signin')
+  const [page, setPage] = useState<Page>('home')
 
   const isSignUp =
     page === 'signup' || page === 'verify' || page === 'password'
+
+    if (page === 'home') {
+      return <Home onSignIn={() => setPage('signin')} />
+    }
 
   let content
 
@@ -21,6 +26,7 @@ function App() {
     content = (
       <SignUp
         onSignIn={() => setPage('signin')}
+        onHome={() => setPage('home')}
         onContinue={(email) => {
           setRegistrationEmail(email)
           setPage('verify')
@@ -28,19 +34,21 @@ function App() {
       />
     )
   } else if (page === 'forgot') {
-    content = <ForgotPassword onSignIn={() => setPage('signin')} />
+    content = <ForgotPassword onSignIn={() => setPage('signin')} onHome={() => setPage('home')} />
   } else if (page === 'verify') {
     content = (
       <VerifyEmail
         email={registrationEmail}
         onBack={() => setPage('signup')}
         onVerified={() => setPage('password')}
+        onHome={() => setPage('home')}
       />
     )
   } else if (page === 'password') {
     content = (
       <CreatePassword
         email={registrationEmail}
+        onHome={() => setPage('home')}
         onSignIn={() => {
           setRegistrationEmail('')
           setPage('signin')
@@ -52,6 +60,7 @@ function App() {
       <SignIn
         onSignUp={() => setPage('signup')}
         onForgotPassword={() => setPage('forgot')}
+        onHome={() => setPage('home')}
       />
     )
   }

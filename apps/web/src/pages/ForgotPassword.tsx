@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { ArrowLeft, ArrowRight } from 'lucide-react'
 type ForgotPasswordProps = {
   onSignIn: () => void
+  onHome: () => void
 }
 
 export default function ForgotPassword({
-  onSignIn,
+  onSignIn,onHome
 }: ForgotPasswordProps) {
   const [email, setEmail] = useState('')
   const [submitted, setSubmitted] = useState(false)
@@ -16,10 +17,9 @@ export default function ForgotPassword({
       
     <button
     type="button"
-    disabled
+    onClick={onHome}
     title="The hub page is not connected yet"
-    className="mb-10 inline-flex items-center gap-2 text-sm text-ink-2 transition-colors enabled:hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum disabled:cursor-not-allowed disabled:opacity-60"
-    >
+    className="mb-6 inline-flex items-center gap-2 text-sm text-ink-2 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum"    >
     <ArrowLeft size={16} aria-hidden="true" />
     Back to the hub
     </button>

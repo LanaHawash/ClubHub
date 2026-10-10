@@ -134,3 +134,6 @@ body {
 input[type='password']::-ms-reveal {
   display: none;
 }
+html {
+  scrollbar-gutter: stable;
+}

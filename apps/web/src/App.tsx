@@ -6,9 +6,11 @@ import AuthLayout from './components/AuthLayout'
 import ForgotPassword from './pages/ForgotPassword'
 import VerifyEmail from './pages/VerifyEmail'
 import Home from './pages/Home'
+import Events from './pages/Events'
+import Navbar from './components/Navbar'
+import Clubs from './pages/Clubs'
 
-type Page = 'home' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
-
+type Page = 'home' | 'clubs' | 'events' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
 function App() {
   const [registrationEmail, setRegistrationEmail] = useState('')
   const [page, setPage] = useState<Page>('home')
@@ -16,9 +18,30 @@ function App() {
   const isSignUp =
     page === 'signup' || page === 'verify' || page === 'password'
 
-    if (page === 'home') {
-      return <Home onSignIn={() => setPage('signin')} />
-    }
+    if (page === 'home' || page === 'clubs' || page === 'events') {
+        return (
+          <div className="min-h-screen bg-paper text-ink">
+            <Navbar
+              page={page}
+              onHome={() => setPage('home')}
+              onClubs={() => setPage('clubs')}
+              onEvents={() => setPage('events')}
+              onSignIn={() => setPage('signin')}
+            />
+
+            {page === 'home' ? (
+              <Home
+                onSignIn={() => setPage('signin')}
+                onEvents={() => setPage('events')}
+              />
+            ) : page === 'clubs' ? (
+              <Clubs />
+            ) : (
+              <Events />
+            )}
+          </div>
+        )
+      }
 
   let content
 

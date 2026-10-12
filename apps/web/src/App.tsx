@@ -10,8 +10,9 @@ import Events from './pages/Events'
 import Navbar from './components/Navbar'
 import Clubs from './pages/Clubs'
 import Dashboard from './pages/Dashboard'
+import ClubPage from './pages/ClubPage'
 
-type Page = 'home' | 'clubs' | 'events' | 'dashboard' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
+type Page = 'home' | 'clubs' | 'club' | 'events' | 'dashboard' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
 
 type Session = {
   account: SignedInAccount
@@ -24,6 +25,7 @@ function App() {
   const [registrationToken, setRegistrationToken] = useState('')
   const [page, setPage] = useState<Page>('home')
   const [session, setSession] = useState<Session | null>(null)
+  const [selectedClubId, setSelectedClubId] = useState<string | null>(null)
 
   // The JWT is held in React memory only. Refreshing the page signs out.
   useEffect(() => {
@@ -46,13 +48,25 @@ function App() {
     setPage('home')
   }
 
+  function openClub(clubId: string) {
+  setSelectedClubId(clubId)
+  setPage('club')
+  window.scrollTo(0, 0)
+}
+
   const isSignUp = page === 'signup' || page === 'verify' || page === 'password'
 
-  if (page === 'home' || page === 'clubs' || page === 'events' || page === 'dashboard') {
+  if (
+  page === 'home' ||
+  page === 'clubs' ||
+  page === 'club' ||
+  page === 'events' ||
+  page === 'dashboard'
+) {
     return (
       <div className="min-h-screen bg-paper text-ink">
         <Navbar
-          page={page}
+          page={page === 'club' ? 'clubs' : page}
           onHome={() => setPage('home')}
           onClubs={() => setPage('clubs')}
           onEvents={() => setPage('events')}
@@ -68,7 +82,15 @@ function App() {
             isSignedIn={Boolean(session)}
           />
         ) : page === 'clubs' ? (
-          <Clubs />
+          <Clubs onClubClick={openClub} />
+        ) : page === 'club' && selectedClubId ? (
+          <ClubPage
+            clubId={selectedClubId}
+            onBack={() => {
+              setPage('clubs')
+              window.scrollTo(0, 0)
+            }}
+          />
         ) : page === 'events' ? (
           <Events 
           isSignedIn={Boolean(session)} 

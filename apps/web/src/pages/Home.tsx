@@ -2,14 +2,48 @@ import { useEffect, useState } from 'react'
 import { ArrowRight, Clock, MapPin, ChevronLeft,ChevronRight,Megaphone, } from 'lucide-react'
 import featuredEvent from '../assets/hack.jpg'
 import featuredEvent1 from '../assets/club.webp'
-import ClubCard from '../components/ClubCard'
+import ClubCard, { scopeLabel, useClubs } from '../components/ClubCard'
 import EventCard from '../components/EventCard'
 import EventFeed from '../components/EventFeed'
+import EventModal from '../components/EventModal'
+import type { EventFeedData, EventType } from '../components/EventFeed'
 
+type ApiEvent = {
+  id: string
+  title: string
+  description: string
+  category: string
+  startDate: string
+  endDate: string | null
+  startTime: string | null
+  location: string | null
+  imageUrl: string | null
+  sourceUrl: string | null
+  registrationOpen: boolean
+  registrationDeadline: string | null
+  isFree: boolean
+  memberFee: string
+  nonMemberFee: string
+  capacity: number | null
+  club: {
+    id: string
+    name: string
+  }
+}
+const categoryNames: Record<string, EventType> = {
+  WORKSHOP: 'Workshop',
+  SEMINAR: 'Seminar',
+  CAMPAIGN: 'Campaign',
+  CONFERENCE: 'Conference',
+  SOCIAL: 'Social',
+  VOLUNTEERING: 'Volunteering',
+  OTHER: 'Other',
+}
 
 type HomeProps = {
   onSignIn: () => void
   onEvents: () => void
+  isSignedIn: boolean
 }
 
 const featuredEvents = [
@@ -39,7 +73,76 @@ const featuredEvents = [
   },
 ]
 
-export default function Home({ onSignIn, onEvents }: HomeProps) {
+export default function Home({
+  onSignIn,
+  onEvents,
+  isSignedIn,
+}: HomeProps) {
+  const { clubs, loading: clubsLoading, error: clubsError } = useClubs()
+  const [upcomingEvents, setUpcomingEvents] = useState<EventFeedData[]>([])
+const [selectedEvent, setSelectedEvent] = useState<EventFeedData | null>(null)
+const [eventsLoading, setEventsLoading] = useState(true)
+const [eventsError, setEventsError] = useState<string | null>(null)
+
+useEffect(() => {
+  const controller = new AbortController()
+
+  async function loadEvents() {
+    setEventsLoading(true)
+    setEventsError(null)
+
+    try {
+      const response = await fetch('/api/events?period=upcoming', {
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+
+      const data: ApiEvent[] = await response.json()
+
+      const mapped: EventFeedData[] = data.map((event) => ({
+        id: event.id,
+        title: event.title,
+        type: categoryNames[event.category] ?? 'Other',
+        date: event.startDate.slice(0, 10),
+        endDate: event.endDate?.slice(0, 10) ?? null,
+        startTime: event.startTime,
+        imageUrl: event.imageUrl,
+        location: event.location ?? '',
+        organizerName: event.club.name,
+        description: event.description,
+        sourceUrl: event.sourceUrl,
+        registrationOpen: event.registrationOpen,
+        registrationDeadline: event.registrationDeadline?.slice(0, 10) ?? null,
+        isFree: event.isFree,
+        memberFee: Number(event.memberFee),
+        nonMemberFee: Number(event.nonMemberFee),
+        capacity: event.capacity,
+        seatsLeft: event.capacity,
+        fee: event.isFree ? 0 : Number(event.nonMemberFee),
+      }))
+
+      if (!controller.signal.aborted) {
+        setUpcomingEvents(mapped)
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setEventsError(
+          error instanceof Error ? error.message : 'Unable to load events',
+        )
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setEventsLoading(false)
+      }
+    }
+  }
+
+  void loadEvents()
+  return () => controller.abort()
+}, [])
   const [activeIndex, setActiveIndex] = useState(0)
   const [selectedCategory, setSelectedCategory] = useState<
     'major' | 'faculty' | 'general'
@@ -65,6 +168,8 @@ export default function Home({ onSignIn, onEvents }: HomeProps) {
                 featuredEvents.length,
         )
         }
+    const matchingClubs = clubs.filter((club) => club.scope === selectedCategory)
+
     return (
     <div id="home" className="min-h-screen bg-paper text-ink">
 
@@ -320,34 +425,25 @@ export default function Home({ onSignIn, onEvents }: HomeProps) {
     </div>
     {/* Club discovery results */}
     <div className="mt-8">
-      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-        {import.meta.env.DEV && (
-          <ClubCard
-            isPlaceholder
-            club={{
-              id: 'preview-club',
-              name: 'Club name',
-              description: 'Club description will appear here.',
-              scope: 'By major',
-              members: 0,
-            }}
-          />
-        )}
-      </div>
-      {!import.meta.env.DEV && (
-      <div className="rounded-3xl border border-dashed border-ink/20 bg-paper-2/40 px-6 py-14 text-center">
-        <h3 className="font-display text-3xl text-ink">
-          No clubs to display yet
-        </h3>
-
-        <p className="mx-auto mt-3 max-w-md text-sm text-ink-2">
-          Club information will appear here once it is available
-          from ClubHub.
-        </p>
-      </div>
+      {clubsLoading && <p className="text-sm text-ink-2">Loading clubs...</p>}
+      {clubsError && <p role="alert" className="text-sm text-rose">{clubsError}</p>}
+      {!clubsLoading && !clubsError && (
+        matchingClubs.length > 0 ? (
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {matchingClubs.map((club) => (
+              <ClubCard
+                key={club.id}
+                club={{ ...club, scope: scopeLabel(club.scope) }}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-3xl border border-dashed border-ink/20 p-10 text-center text-ink-2">
+            No clubs in this category yet.
+          </p>
+        )
       )}
     </div>
-
   </div>
   </section>
 
@@ -368,21 +464,31 @@ export default function Home({ onSignIn, onEvents }: HomeProps) {
         </h2>
 
         <div className="mt-10 grid gap-5 md:grid-cols-3">
-  {import.meta.env.DEV ? (
-    <EventCard
-      event={{
-        id: 'event-preview',
-        title: 'Upcoming Campus Workshop',
-        imageUrl: featuredEvent,
-        date: 'Event date',
-        time: 'Event time',
-        organizerName: 'Organizing club',
-      }}
-    />
-  ) : (
+  {eventsLoading ? (
+    <p className="text-sm text-ink-2">Loading upcoming events...</p>
+  ) : eventsError ? (
+    <p role="alert" className="text-sm text-rose">
+      Unable to load upcoming events: {eventsError}
+    </p>
+  ) : upcomingEvents.length === 0 ? (
     <p className="text-sm text-ink-2">
       No upcoming events available.
     </p>
+  ) : (
+    upcomingEvents.slice(0, 3).map((event) => (
+      <EventCard
+        key={event.id}
+        event={{
+          id: event.id,
+          title: event.title,
+          imageUrl: event.imageUrl ?? '',
+          date: event.date,
+          time: event.startTime ?? 'Time TBA',
+          organizerName: event.organizerName,
+        }}
+        onClick={() => setSelectedEvent(event)}
+      />
+    ))
   )}
 </div>
 
@@ -405,7 +511,14 @@ export default function Home({ onSignIn, onEvents }: HomeProps) {
   </button>
 </div>
 
-    <EventFeed events={[]} />
+    <EventFeed
+  events={upcomingEvents}
+  onEventClick={(id) => {
+    const event = upcomingEvents.find((item) => item.id === id)
+    if (event) setSelectedEvent(event)
+  }}
+  emptyMessage="No upcoming events available."
+/>
 
   </div>
 </section>
@@ -413,6 +526,13 @@ export default function Home({ onSignIn, onEvents }: HomeProps) {
 
 
 </main>
+<EventModal
+  event={selectedEvent}
+  isPast={false}
+  isSignedIn={isSignedIn}
+  onSignIn={onSignIn}
+  onClose={() => setSelectedEvent(null)}
+/>
     </div>
   )
 }

@@ -43,9 +43,9 @@ const categoryNames: Record<string, EventType> = {
 type HomeProps = {
   onSignIn: () => void
   onEvents: () => void
+  onClubClick: (clubId: string) => void
   isSignedIn: boolean
 }
-
 const featuredEvents = [
   {
     id: 'hackathon',
@@ -76,6 +76,7 @@ const featuredEvents = [
 export default function Home({
   onSignIn,
   onEvents,
+  onClubClick,
   isSignedIn,
 }: HomeProps) {
   const { clubs, loading: clubsLoading, error: clubsError } = useClubs()
@@ -434,6 +435,7 @@ useEffect(() => {
               <ClubCard
                 key={club.id}
                 club={{ ...club, scope: scopeLabel(club.scope) }}
+                onClick={() => onClubClick(club.id)}
               />
             ))}
           </div>

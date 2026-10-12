@@ -79,6 +79,7 @@ function App() {
           <Home
             onSignIn={() => setPage('signin')}
             onEvents={() => setPage('events')}
+            onClubClick={openClub}
             isSignedIn={Boolean(session)}
           />
         ) : page === 'clubs' ? (

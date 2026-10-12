@@ -9,7 +9,11 @@ const categories = [
   { id: 'general', label: 'General interest' },
 ] as const
 
-export default function Clubs() {
+type ClubsProps = {
+  onClubClick: (clubId: string) => void
+}
+
+export default function Clubs({ onClubClick }: ClubsProps) {
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<'all' | ClubScope>('all')
   const { clubs, loading, error } = useClubs()
@@ -71,9 +75,10 @@ export default function Clubs() {
           <div className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {filteredClubs.map((club) => (
               <ClubCard
-                key={club.id}
-                club={{ ...club, scope: scopeLabel(club.scope) }}
-              />
+  key={club.id}
+  club={{ ...club, scope: scopeLabel(club.scope) }}
+  onClick={() => onClubClick(club.id)}
+/>
             ))}
           </div>
         ) : (

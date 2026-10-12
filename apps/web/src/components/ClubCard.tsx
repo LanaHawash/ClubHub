@@ -92,7 +92,7 @@ const acronymOverrides: Record<string, string> = {
   'Institute of Electrical and Electronics Engineers': 'IEEE',
 }
 
-function getClubInitials(name: string): string {
+export function getClubInitials(name: string): string {
   if (acronymOverrides[name]) return acronymOverrides[name]
 
   const ignored = new Set(['of', 'and', 'the'])
@@ -103,7 +103,7 @@ function getClubInitials(name: string): string {
     .join('')
 }
 
-const coverColors: Record<string, string> = {
+export const coverColors: Record<string, string> = {
   'Language Resource Center': 'bg-lilac',
   'Engineers Without Borders': 'bg-mint',
   'Institute of Electrical and Electronics Engineers': 'bg-butter',
@@ -134,7 +134,7 @@ export default function ClubCard({
       : 'text-[4.5rem]'
 
   return (
-    <article className="group flex flex-col overflow-hidden rounded-3xl border border-ink/10 bg-card text-left transition duration-300 hover:-translate-y-1 hover:shadow-xl">
+    <article onClick={onClick} className="group flex flex-col overflow-hidden rounded-3xl border border-ink/10 bg-card text-left transition duration-300 hover:-translate-y-1 hover:shadow-xl">
       <div className={`relative h-40 overflow-hidden ${coverColors[club.name] ?? 'bg-lilac'}`}>
         {club.imageUrl ? (
           <img src={club.imageUrl} alt="" className="h-full w-full object-cover" />
@@ -178,7 +178,10 @@ export default function ClubCard({
           {onClick ? (
             <button
               type="button"
-              onClick={onClick}
+              onClick={(event) => {
+              event.stopPropagation()
+              onClick?.()
+            }}
               aria-label={`View ${club.name}`}
               className="grid size-9 place-items-center rounded-full bg-ink text-paper transition hover:bg-rose hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-plum"
             >

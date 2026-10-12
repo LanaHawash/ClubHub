@@ -23,7 +23,7 @@ import { EventsModule } from './modules/events/events.module';
     ThrottlerModule.forRoot([
       {
         ttl: 60000,
-        limit: 5,
+        limit: 1000,
       },
     ]),
     ClubsModule,

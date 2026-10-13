@@ -11,6 +11,7 @@ import Navbar from './components/Navbar'
 import Clubs from './pages/Clubs'
 import Dashboard from './pages/Dashboard'
 import ClubPage from './pages/ClubPage'
+import Footer from './components/Footer'
 
 type Page = 'home' | 'clubs' | 'club' | 'events' | 'dashboard' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
 
@@ -64,7 +65,7 @@ function App() {
   page === 'dashboard'
 ) {
     return (
-      <div className="min-h-screen bg-paper text-ink">
+      <div className="flex min-h-screen flex-col bg-paper text-ink">
         <Navbar
           page={page === 'club' ? 'clubs' : page}
           onHome={() => setPage('home')}
@@ -75,6 +76,7 @@ function App() {
           signedInEmail={session?.account.email}
           onSignOut={handleSignOut}
         />
+                <main className="flex-1">
         {page === 'home' ? (
           <Home
             onSignIn={() => setPage('signin')}
@@ -97,9 +99,15 @@ function App() {
           isSignedIn={Boolean(session)} 
           onSignIn={() => setPage('signin')}
           />
-        ) : session ? (
-          <Dashboard account={session.account} onClubs={() => setPage('clubs')} />
+                ) : session ? (
+          <Dashboard
+            account={session.account}
+            onClubs={() => setPage('clubs')}
+          />
         ) : null}
+        </main>
+
+        <Footer />
       </div>
     )
   }

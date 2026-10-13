@@ -137,3 +137,39 @@ input[type='password']::-ms-reveal {
 html {
   scrollbar-gutter: stable;
 }
+
+/* =========================================
+   DASHBOARD — ANIMATED STATISTICS CARDS
+   ========================================= */
+
+/* Figma dashboard statistics animation */
+
+.pin-tile {
+  --e: clamp(
+    0,
+    calc((var(--p, 1) - 0.08 - var(--i) * 0.07) * 2.8),
+    1
+  );
+
+  transform:
+    translate(
+      calc((1.5 - var(--i)) * 106% * (1 - var(--e))),
+      calc(var(--i) * 10px * (1 - var(--e)))
+    )
+    rotate(
+      calc((var(--i) - 1.5) * 2.5deg * (1 - var(--e)))
+    );
+
+  will-change: transform, opacity;
+}
+
+/* Accessibility: disable movement for users
+   who prefer reduced motion. */
+
+@media (prefers-reduced-motion: reduce) {
+  .pin-tile {
+    opacity: 1;
+    transform: none;
+    will-change: auto;
+  }
+}

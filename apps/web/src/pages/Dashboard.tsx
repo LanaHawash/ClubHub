@@ -1,15 +1,16 @@
-import { BadgeCheck, Bell, CalendarCheck, CreditCard, UserRound } from 'lucide-react'
+import { UserRound } from 'lucide-react'
 import type { SignedInAccount } from './SignIn'
+import PinnedStats from '../components/PinnedStats'
 
 type DashboardProps = { account: SignedInAccount; onClubs: () => void }
 
 export default function Dashboard({ account, onClubs }: DashboardProps) {
   const cards = [
-    { label: 'Active memberships', icon: BadgeCheck, color: 'bg-lilac' },
-    { label: 'Upcoming events', icon: CalendarCheck, color: 'bg-butter' },
-    { label: 'Payments pending', icon: CreditCard, color: 'bg-rose-soft' },
-    { label: 'Unread alerts', icon: Bell, color: 'bg-mint' },
-  ]
+  { label: 'Active memberships', color: 'bg-lilac' },
+  { label: 'Upcoming events', color: 'bg-butter' },
+  { label: 'Payments pending', color: 'bg-rose-soft' },
+  { label: 'Unread alerts', color: 'bg-mint' },
+]
   return (
     <main className="mx-auto max-w-7xl px-5 pb-24 pt-12 sm:px-8">
       <header className="flex flex-wrap items-center gap-5">
@@ -20,15 +21,13 @@ export default function Dashboard({ account, onClubs }: DashboardProps) {
           <p className="mt-3 text-sm text-ink-2">{account.email}</p>
         </div>
       </header>
-      <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {cards.map(({ label, icon: Icon, color }) => (
-          <div key={label} className={`rounded-3xl ${color} p-6`}>
-            <Icon size={22} aria-hidden="true" />
-            <p className="mt-8 text-sm font-semibold text-ink">{label}</p>
-            <p className="mt-2 text-sm text-ink-2">Not available yet</p>
-          </div>
-        ))}
-      </div>
+      <PinnedStats
+  stats={cards.map(({ label, color }) => ({
+    k: label,
+    v: '—',
+    bg: color,
+  }))}
+/>
       <section className="mt-12 rounded-3xl border border-ink/10 bg-card p-7 sm:p-10">
         <h2 className="font-display text-4xl">My memberships</h2>
         <p className="mt-3 max-w-xl text-ink-2">Membership data will appear here after the membership and payment APIs are implemented. No demo memberships or payments are shown.</p>

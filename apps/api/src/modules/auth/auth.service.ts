@@ -13,7 +13,13 @@ import { hash, compare } from 'bcrypt';
 
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { MailService } from '../../shared/mail/mail.service';
+import {
+  generateRefreshToken,
+  hashRefreshToken,
+  getRefreshTokenExpiration,
+} from './refresh-token.util';
 
+import { createHash } from 'node:crypto';
 import {
   AccountRole,
   AccountStatus,
@@ -397,9 +403,20 @@ async login(email: string, password: string) {
     },
   );
 
+  const refreshToken = generateRefreshToken();
+
+await this.prisma.refreshSession.create({
+  data: {
+    accountId: account.id,
+    tokenHash: hashRefreshToken(refreshToken),
+    expiresAt: getRefreshTokenExpiration(),
+  },
+});
+
   return {
     message: 'Login successful',
     accessToken,
+    refreshToken,
     tokenType: 'Bearer',
     expiresIn: 900,
     account: {
@@ -411,6 +428,118 @@ async login(email: string, password: string) {
   };
 }
 
+async refreshToken(oldRefreshToken: string) {
+  if (!oldRefreshToken || typeof oldRefreshToken !== 'string') {
+    throw new UnauthorizedException('Invalid refresh token');
+  }
+
+  const oldTokenHash = hashRefreshToken(oldRefreshToken);
+  const now = new Date();
+
+  // Check whether this token has already been used.
+  const previousToken = await this.prisma.refreshTokenHistory.findUnique({
+    where: { tokenHash: oldTokenHash },
+  });
+
+  if (previousToken) {
+    // Briefly tolerate a duplicate request arriving during rotation.
+    // It is still rejected, but does not immediately revoke the session.
+    if (now.getTime() - previousToken.createdAt.getTime() > 5000) {
+      await this.prisma.refreshSession.updateMany({
+        where: {
+          id: previousToken.sessionId,
+          revokedAt: null,
+        },
+        data: { revokedAt: now },
+      });
+    }
+
+    throw new UnauthorizedException('Refresh token already used');
+  }
+
+  const session = await this.prisma.refreshSession.findUnique({
+    where: { tokenHash: oldTokenHash },
+    include: { account: true },
+  });
+
+  if (
+    !session ||
+    session.revokedAt !== null ||
+    session.expiresAt <= now ||
+    session.account.status !== 'ACTIVE'
+  ) {
+    throw new UnauthorizedException('Invalid or expired refresh token');
+  }
+
+  const newRefreshToken = generateRefreshToken();
+
+  // Both database changes must succeed together.
+  await this.prisma.$transaction(async (tx) => {
+    const result = await tx.refreshSession.updateMany({
+      where: {
+        id: session.id,
+        tokenHash: oldTokenHash,
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: {
+        tokenHash: hashRefreshToken(newRefreshToken),
+        expiresAt: getRefreshTokenExpiration(),
+      },
+    });
+
+    if (result.count !== 1) {
+      throw new UnauthorizedException('Refresh token already used');
+    }
+
+    await tx.refreshTokenHistory.create({
+      data: {
+        sessionId: session.id,
+        tokenHash: oldTokenHash,
+      },
+    });
+  });
+
+  const accessToken = await this.jwt.signAsync(
+    {
+      sub: session.account.id,
+      role: session.account.role,
+      purpose: 'access',
+    },
+    {
+      secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+      expiresIn: '15m',
+    },
+  );
+
+  return {
+    accessToken,
+    refreshToken: newRefreshToken,
+    tokenType: 'Bearer',
+    expiresIn: 900,
+  };
+}
+async logout(refreshToken: string) {
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    throw new UnauthorizedException('Invalid refresh token');
+  }
+
+  const tokenHash = hashRefreshToken(refreshToken);
+
+  await this.prisma.refreshSession.updateMany({
+    where: {
+      tokenHash,
+      revokedAt: null,
+    },
+    data: {
+      revokedAt: new Date(),
+    },
+  });
+
+  return {
+    message: 'Logged out successfully',
+  };
+}
 async getCurrentUser(accountId: string) {
   const account = await this.prisma.account.findUnique({
     where: { id: accountId },

@@ -40,14 +40,14 @@ model Faculty {
 }
 
 model Major {
-  id               String              @id @default(uuid()) @db.Uuid
-  name             String              @db.VarChar(150)
-  facultyId        String              @db.Uuid
-  faculty          Faculty             @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  id                 String              @id @default(uuid()) @db.Uuid
+  name               String              @db.VarChar(150)
+  facultyId          String              @db.Uuid
+  faculty            Faculty             @relation(fields: [facultyId], references: [id], onDelete: Restrict)
   universityStudents UniversityStudent[]
-  eligibleClubs    ClubEligibleMajor[]
-  createdAt        DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt        DateTime            @updatedAt @db.Timestamptz(6)
+  eligibleClubs      ClubEligibleMajor[]
+  createdAt          DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime            @updatedAt @db.Timestamptz(6)
 
   @@unique([facultyId, name])
 }
@@ -66,17 +66,18 @@ model UniversityStudent {
 }
 
 model Account {
-  id                  String             @id @default(uuid()) @db.Uuid
-  email               String             @unique @db.VarChar(255)
-  passwordHash        String             @db.VarChar(255)
+  id                  String              @id @default(uuid()) @db.Uuid
+  email               String              @unique @db.VarChar(255)
+  passwordHash        String              @db.VarChar(255)
   role                AccountRole
-  status              AccountStatus      @default(ACTIVE)
-  universityStudentId String?            @unique @db.Uuid
-  universityStudent   UniversityStudent? @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
-  profilePhotoUrl     String?            @db.Text
+  status              AccountStatus       @default(ACTIVE)
+  universityStudentId String?             @unique @db.Uuid
+  universityStudent   UniversityStudent?  @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
+  profilePhotoUrl     String?             @db.Text
   eventRegistrations  EventRegistration[]
-  createdAt           DateTime           @default(now()) @db.Timestamptz(6)
-  updatedAt           DateTime           @updatedAt @db.Timestamptz(6)
+  refreshSessions     RefreshSession[]
+  createdAt           DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime            @updatedAt @db.Timestamptz(6)
 }
 
 model EmailVerification {
@@ -161,6 +162,7 @@ enum EventStatus {
   PUBLISHED
   CANCELLED
 }
+
 enum EventEligibility {
   ALL_STUDENTS
   CLUB_MEMBERS
@@ -181,74 +183,100 @@ enum EventPaymentStatus {
 }
 
 model Event {
-  id          String        @id @default(uuid()) @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
 
-  clubId      String        @db.Uuid
-  club        Club          @relation(fields: [clubId], references: [id], onDelete: Restrict)
+  clubId String @db.Uuid
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Restrict)
 
-  title       String        @db.VarChar(255)
-  description String        @db.Text
+  title       String @db.VarChar(255)
+  description String @db.Text
 
-  category    EventCategory
-  status      EventStatus   @default(DRAFT)
+  category EventCategory
+  status   EventStatus   @default(DRAFT)
 
-  startDate   DateTime      @db.Date
-  endDate     DateTime?     @db.Date
+  startDate DateTime  @db.Date
+  endDate   DateTime? @db.Date
 
-  startTime   String?       @db.VarChar(5)
-  endTime     String?       @db.VarChar(5)
+  startTime String? @db.VarChar(5)
+  endTime   String? @db.VarChar(5)
 
-  location    String?       @db.VarChar(255)
-  imageUrl    String?       @db.Text
+  location String? @db.VarChar(255)
+  imageUrl String? @db.Text
 
-  sourceUrl   String?       @db.Text
-    // Registration settings
+  sourceUrl            String?          @db.Text
+  // Registration settings
   registrationOpen     Boolean          @default(false)
   registrationDeadline DateTime?        @db.Date
   eligibility          EventEligibility @default(ALL_STUDENTS)
 
   // NULL means unlimited capacity
-  capacity             Int?
+  capacity Int?
 
   // Pricing in the event's currency
-  isFree               Boolean          @default(true)
-  memberFee            Decimal          @default(0) @db.Decimal(10, 2)
-  nonMemberFee         Decimal          @default(0) @db.Decimal(10, 2)
-  currency             String           @default("ILS") @db.VarChar(3)
+  isFree       Boolean @default(true)
+  memberFee    Decimal @default(0) @db.Decimal(10, 2)
+  nonMemberFee Decimal @default(0) @db.Decimal(10, 2)
+  currency     String  @default("ILS") @db.VarChar(3)
 
   // Student registrations
-  registrations        EventRegistration[]
+  registrations EventRegistration[]
 
-  createdAt   DateTime      @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime      @updatedAt @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   @@index([clubId, startDate])
   @@index([status, startDate])
 }
 
-
 model EventRegistration {
-  id            String                  @id @default(uuid()) @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
 
-  eventId       String                  @db.Uuid
-  accountId     String                  @db.Uuid
+  eventId   String @db.Uuid
+  accountId String @db.Uuid
 
-  event         Event                   @relation(fields: [eventId], references: [id], onDelete: Restrict)
-  account       Account                 @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  event   Event   @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
   status        EventRegistrationStatus @default(CONFIRMED)
   paymentStatus EventPaymentStatus      @default(NOT_REQUIRED)
 
-  amountDue     Decimal                 @default(0) @db.Decimal(10, 2)
+  amountDue Decimal @default(0) @db.Decimal(10, 2)
 
-  registeredAt  DateTime                @default(now()) @db.Timestamptz(6)
-  createdAt     DateTime                @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime                @updatedAt @db.Timestamptz(6)
+  registeredAt DateTime @default(now()) @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
 
   // One registration record per student per event.
   // A cancelled registration can be reactivated later.
   @@unique([eventId, accountId])
-
   @@index([eventId, status])
   @@index([accountId, status])
+}
+
+model RefreshSession {
+  id        String @id @default(uuid()) @db.Uuid
+  accountId String @db.Uuid
+  tokenHash String @unique
+
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  account      Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  tokenHistory RefreshTokenHistory[]
+
+  @@index([accountId])
+  @@index([expiresAt])
+}
+
+model RefreshTokenHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @db.Uuid
+  tokenHash String @unique
+
+  createdAt DateTime @default(now())
+
+  session RefreshSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
 }

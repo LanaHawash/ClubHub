@@ -19,4 +19,14 @@ export class UniversityService {
       orderBy: { name: 'asc' },
     });
   }
+  findMajorsByFaculty(facultyId: string) {
+  return this.prisma.major.findMany({
+    where: {
+      facultyId,
+    },
+    orderBy: {
+      name: 'asc',
+    },
+  });
+}
 }

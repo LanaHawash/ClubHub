@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Param, ParseUUIDPipe } from '@nestjs/common';
 import { UniversityService } from './university.service';
 
 @Controller('university')
@@ -16,4 +16,10 @@ export class UniversityController {
   getMajors() {
     return this.universityService.findAllMajors();
   }
+  @Get('faculties/:id/majors')
+getMajorsByFaculty(
+  @Param('id', new ParseUUIDPipe()) facultyId: string,
+) {
+  return this.universityService.findMajorsByFaculty(facultyId);
+}
 }

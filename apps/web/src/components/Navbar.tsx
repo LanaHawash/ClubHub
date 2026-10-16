@@ -13,16 +13,33 @@ type NavbarProps = {
   onSignIn: () => void
   onSignOut: () => void
   signedInEmail?: string
+  accountRole?: string
 }
 
-export default function Navbar({ page, onHome, onClubs, onEvents, onDashboard, onSignIn, onSignOut, signedInEmail }: NavbarProps) {
+export default function Navbar({
+  page,
+  onHome,
+  onClubs,
+  onEvents,
+  onDashboard,
+  onSignIn,
+  onSignOut,
+  signedInEmail,
+  accountRole,
+}: NavbarProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const authenticated = Boolean(signedInEmail)
   const links: { id: Page; label: string; action: () => void }[] = [
     { id: 'home', label: 'Home', action: onHome },
     { id: 'clubs', label: 'Clubs', action: onClubs },
     { id: 'events', label: 'Events', action: onEvents },
-    ...(authenticated ? [{ id: 'dashboard' as const, label: 'Dashboard', action: onDashboard }] : []),
+   ...(authenticated
+  ? [{
+      id: 'dashboard' as const,
+      label: accountRole === 'DEANSHIP' ? 'Admin' : 'Dashboard',
+      action: onDashboard,
+    }]
+  : []),
   ]
   function navigate(action: () => void) {
     setMenuOpen(false)
@@ -52,7 +69,7 @@ export default function Navbar({ page, onHome, onClubs, onEvents, onDashboard, o
               <button type="button" disabled aria-label="Notifications (coming soon)" title="Notifications coming soon" className="relative grid size-10 place-items-center rounded-full opacity-40 cursor-not-allowed">
                 <Bell size={19} aria-hidden="true" />
               </button>
-              <button type="button" onClick={() => navigate(onDashboard)} aria-label="My dashboard" title={signedInEmail} className="grid size-10 place-items-center rounded-full border-2 border-rose bg-lilac text-ink transition hover:ring-2 hover:ring-rose/40">
+              <button type="button" onClick={() => navigate(onDashboard)} aria-label={accountRole === 'DEANSHIP' ? 'Admin interface' : 'My dashboard'} title={signedInEmail} className="grid size-10 place-items-center rounded-full border-2 border-rose bg-lilac text-ink transition hover:ring-2 hover:ring-rose/40">
                 <UserRound size={19} aria-hidden="true" />
               </button>
               <button type="button" onClick={() => navigate(onSignOut)} aria-label="Sign out" title="Sign out" className="hidden size-10 place-items-center rounded-full transition hover:bg-paper-2 md:grid">

@@ -1,4 +1,4 @@
-import {
+﻿import {
   CanActivate,
   ExecutionContext,
   Injectable,
@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
+import { PrismaService } from '../../shared/prisma/prisma.service';
 
 export type AuthenticatedUser = {
   id: string;
@@ -20,9 +21,10 @@ export type AuthenticatedRequest = Request & {
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   constructor(
-    private readonly jwt: JwtService,
-    private readonly config: ConfigService,
-  ) {}
+  private readonly jwt: JwtService,
+  private readonly config: ConfigService,
+  private readonly prisma: PrismaService,
+) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context
@@ -54,10 +56,25 @@ export class JwtAuthGuard implements CanActivate {
         throw new UnauthorizedException('Invalid access token');
       }
 
-      request.user = {
-        id: payload.sub,
-        role: payload.role,
-      };
+      const account = await this.prisma.account.findUnique({
+  where: { id: payload.sub },
+  select: {
+    id: true,
+    role: true,
+    status: true,
+  },
+});
+
+if (!account || account.status !== 'ACTIVE') {
+  throw new UnauthorizedException('Account unavailable');
+}
+
+request.user = {
+  id: account.id,
+  role: account.role,
+};
+
+
 
       return true;
     } catch {

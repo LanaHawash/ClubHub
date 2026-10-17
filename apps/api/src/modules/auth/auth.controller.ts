@@ -14,10 +14,12 @@ import { StartRegistrationDto } from './dto/start-registration.dto';
 import { VerifyRegistrationDto } from './dto/verify-registration.dto';
 import { CompleteRegistrationDto } from './dto/complete-registration.dto';
 import { LoginDto } from './dto/login.dto';
-
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import type { AuthenticatedRequest } from './jwt-auth.guard';
 //import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 const REFRESH_COOKIE = 'clubhub_refresh';
 
@@ -141,6 +143,31 @@ async logout(
   });
 
   return { message: 'Logged out successfully' };
+}
+
+@Post('forgot-password')
+forgotPassword(@Body() dto: ForgotPasswordDto) {
+  return this.authService.forgotPassword(dto.email);
+}
+@Post('reset-password')
+resetPassword(@Body() dto: ResetPasswordDto) {
+  return this.authService.resetPassword(
+    dto.token,
+    dto.newPassword,
+  );
+}
+
+@Post('change-password')
+@UseGuards(JwtAuthGuard)
+changePassword(
+  @Req() request: AuthenticatedRequest,
+  @Body() dto: ChangePasswordDto,
+) {
+  return this.authService.changePassword(
+    request.user.id,
+    dto.currentPassword,
+    dto.newPassword,
+  );
 }
 
 }

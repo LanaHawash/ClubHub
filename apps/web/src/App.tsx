@@ -4,6 +4,7 @@ import SignUp from './pages/SignUp'
 import CreatePassword from './pages/CreatePassword'
 import AuthLayout from './components/AuthLayout'
 import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 import VerifyEmail from './pages/VerifyEmail'
 import Home from './pages/Home'
 import Events from './pages/Events'
@@ -13,8 +14,25 @@ import Dashboard from './pages/Dashboard'
 import ClubPage from './pages/ClubPage'
 import Footer from './components/Footer'
 import DeanshipApp from './deanship/DeanshipApp'
+import ChangePassword from './pages/ChangePassword'
+import StudentProfile from './pages/StudentProfile'
 
-type Page = 'home' | 'clubs' | 'club' | 'events' | 'dashboard' | 'admin' | 'signin' | 'signup' | 'forgot' | 'verify' | 'password'
+type Page =
+  | 'home'
+  | 'clubs'
+  | 'club'
+  | 'events'
+  | 'dashboard'
+  | 'admin'
+  | 'signin'
+  | 'signup'
+  | 'forgot'
+  | 'reset'
+  | 'verify'
+  | 'password'
+  | 'change-password'
+  | 'profile'
+  
 
 type Session = {
   account: SignedInAccount
@@ -61,7 +79,25 @@ function refreshAccessToken(): Promise<RefreshResponse> {
 function App() {
   const [registrationUniversityId, setRegistrationUniversityId] = useState('')
   const [registrationToken, setRegistrationToken] = useState('')
-  const [page, setPage] = useState<Page>('home')
+  const [page, setPage] = useState<Page>(() => {
+  const params = new URLSearchParams(window.location.search)
+
+    return params.has('resetToken') ? 'reset' : 'home'
+  })
+
+  const [resetToken, setResetToken] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('resetToken') ?? ''
+  })
+  useEffect(() => {
+  if (window.location.search.includes('resetToken=')) {
+    window.history.replaceState(
+      {},
+      '',
+      window.location.pathname,
+    )
+  }
+}, [])
   const [session, setSession] = useState<Session | null>(null)
   const [selectedClubId, setSelectedClubId] = useState<string | null>(null)
 
@@ -99,7 +135,9 @@ useEffect(() => {
         })
 
         if (account.role === 'DEANSHIP') {
-          setPage('admin')
+          setPage((currentPage) =>
+            currentPage === 'reset' ? 'reset' : 'admin'
+          )
         }
       }
     } catch {
@@ -213,7 +251,8 @@ if (page === 'admin') {
   page === 'clubs' ||
   page === 'club' ||
   page === 'events' ||
-  page === 'dashboard'
+  page === 'dashboard' || 
+  page === 'profile'
 ) {
     return (
       <div className="flex min-h-screen flex-col bg-paper text-ink">
@@ -229,6 +268,13 @@ if (page === 'admin') {
               setPage('admin')
             } else if (session?.account.role === 'STUDENT') {
               setPage('dashboard')
+            } else {
+              setPage('signin')
+            }
+          }}
+          onProfile={() => {
+            if (session?.account.role === 'STUDENT') {
+              setPage('profile')
             } else {
               setPage('signin')
             }
@@ -259,10 +305,16 @@ if (page === 'admin') {
           isSignedIn={Boolean(session)} 
           onSignIn={() => setPage('signin')}
           />
+          ) : page === 'profile' && session?.account.role === 'STUDENT' ? (
+          <StudentProfile
+            accessToken={session.accessToken}
+            onBack={() => setPage('dashboard')}
+          />
                ) : session?.account.role === 'STUDENT' ? (
                 <Dashboard
                   account={session.account}
                   onClubs={() => setPage('clubs')}
+                  onProfile={() => setPage('profile')}
                 />
               ) : null}
         </main>
@@ -286,8 +338,43 @@ if (page === 'admin') {
       />
     )
   } else if (page === 'forgot') {
-    content = <ForgotPassword onSignIn={() => setPage('signin')} onHome={() => setPage('home')} />
-  } else if (page === 'verify') {
+  content = (
+    <ForgotPassword
+      onSignIn={() => setPage('signin')}
+      onHome={() => setPage('home')}
+    />
+  )
+} else if (page === 'reset') {
+  content = (
+    <ResetPassword
+      token={resetToken}
+      onSignIn={() => {
+        setResetToken('')
+        setPage('signin')
+      }}
+    />
+  )
+} 
+else if (page === 'change-password') {
+  content = session ? (
+    <ChangePassword
+      accessToken={session.accessToken}
+      onBack={() => setPage('dashboard')}
+      onPasswordChanged={() => {
+        void handleSignOut()
+        setPage('signin')
+      }}
+    />
+  ) : (
+    <SignIn
+      onSignUp={() => setPage('signup')}
+      onForgotPassword={() => setPage('forgot')}
+      onHome={() => setPage('home')}
+      onSignedIn={handleSignedIn}
+    />
+  )
+}
+else if (page === 'verify') {
     content = (
       <VerifyEmail
         universityId={registrationUniversityId}

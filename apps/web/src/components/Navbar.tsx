@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bell, LogOut, Menu, UserRound, X } from 'lucide-react'
 
 type PublicPage = 'home' | 'clubs' | 'events'
-type Page = PublicPage | 'dashboard'
+type Page = PublicPage | 'dashboard' | 'profile'
 
 type NavbarProps = {
   page: Page
@@ -14,6 +14,7 @@ type NavbarProps = {
   onSignOut: () => void
   signedInEmail?: string
   accountRole?: string
+  onProfile: () => void
 }
 
 export default function Navbar({
@@ -26,6 +27,7 @@ export default function Navbar({
   onSignOut,
   signedInEmail,
   accountRole,
+  onProfile,
 }: NavbarProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const authenticated = Boolean(signedInEmail)
@@ -69,7 +71,15 @@ export default function Navbar({
               <button type="button" disabled aria-label="Notifications (coming soon)" title="Notifications coming soon" className="relative grid size-10 place-items-center rounded-full opacity-40 cursor-not-allowed">
                 <Bell size={19} aria-hidden="true" />
               </button>
-              <button type="button" onClick={() => navigate(onDashboard)} aria-label={accountRole === 'DEANSHIP' ? 'Admin interface' : 'My dashboard'} title={signedInEmail} className="grid size-10 place-items-center rounded-full border-2 border-rose bg-lilac text-ink transition hover:ring-2 hover:ring-rose/40">
+              <button type="button" onClick={() => navigate(
+                accountRole === 'STUDENT' ? onProfile : onDashboard
+              )} aria-label={
+                accountRole === 'STUDENT'
+                  ? 'My profile'
+                  : accountRole === 'DEANSHIP'
+                    ? 'Admin interface'
+                    : 'My dashboard'
+              } title={signedInEmail} className="grid size-10 place-items-center rounded-full border-2 border-rose bg-lilac text-ink transition hover:ring-2 hover:ring-rose/40">
                 <UserRound size={19} aria-hidden="true" />
               </button>
               <button type="button" onClick={() => navigate(onSignOut)} aria-label="Sign out" title="Sign out" className="hidden size-10 place-items-center rounded-full transition hover:bg-paper-2 md:grid">

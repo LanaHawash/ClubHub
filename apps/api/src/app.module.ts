@@ -11,6 +11,7 @@ import { UniversityModule } from './modules/university/university.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ClubsModule } from './modules/clubs/clubs.module';
 import { EventsModule } from './modules/events/events.module';
+import { StudentsModule } from './modules/students/students.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { EventsModule } from './modules/events/events.module';
     PrismaModule,
     UniversityModule,
     AuthModule,
+    StudentsModule,
 
     ThrottlerModule.forRoot([
       {

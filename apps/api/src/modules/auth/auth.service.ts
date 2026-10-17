@@ -3,12 +3,13 @@ import {
   BadRequestException,
   ConflictException,
   UnauthorizedException,
+  NotFoundException,
 } from '@nestjs/common';
 
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 
-import { randomInt, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomInt, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { hash, compare } from 'bcrypt';
 
 import { PrismaService } from '../../shared/prisma/prisma.service';
@@ -20,6 +21,7 @@ import {
 } from './refresh-token.util';
 
 import { createHash } from 'node:crypto';
+
 import {
   AccountRole,
   AccountStatus,
@@ -98,11 +100,30 @@ async startRegistration(universityId: string) {
     message: 'If registration is available, a verification code will be sent.',
   };
 
-  const student = await this.findEligibleStudent(universityId);
+ const student = await this.prisma.universityStudent.findUnique({
+  where: { universityId },
+  select: {
+    id: true,
+    email: true,
+    account: {
+      select: {
+        id: true,
+      },
+    },
+  },
+});
 
-  if (!student) {
-    return response;
-  }
+if (!student) {
+  throw new NotFoundException(
+    'This university ID was not found in the university student records. Please check your ID and try again.',
+  );
+}
+
+if (student.account) {
+  throw new ConflictException(
+    'You already have a ClubHub account. Please sign in instead.',
+  );
+}
 
   const now = new Date();
 
@@ -575,6 +596,222 @@ async getCurrentUser(accountId: string) {
   }
 
   return account;
+}
+async forgotPassword(email: string) {
+  const response = {
+    message:
+      'If a ClubHub account exists for this email, a password reset link will be sent.',
+  };
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  const account = await this.prisma.account.findUnique({
+    where: {
+      email: normalizedEmail,
+    },
+  });
+
+  if (!account || account.status !== 'ACTIVE') {
+    return response;
+  }
+
+  const token = randomBytes(32).toString('hex');
+
+  const tokenHash = createHash('sha256')
+    .update(token)
+    .digest('hex');
+
+  const expiresAt = new Date(
+    Date.now() + 15 * 60 * 1000,
+  );
+
+  await this.prisma.passwordResetToken.create({
+    data: {
+      accountId: account.id,
+      tokenHash,
+      expiresAt,
+    },
+  });
+
+  const frontendUrl = this.config.get<string>(
+    'FRONTEND_URL',
+    'http://localhost:5173',
+  );
+
+  const resetLink =
+    `${frontendUrl}/?resetToken=${encodeURIComponent(token)}`;
+
+  await this.mail.sendPasswordResetLink(
+    account.email,
+    resetLink,
+  );
+
+  return response;
+}
+
+async resetPassword(
+  token: string,
+  newPassword: string,
+) {
+  const tokenHash = createHash('sha256')
+    .update(token)
+    .digest('hex');
+
+  const now = new Date();
+
+  const passwordHash = await hash(newPassword, 12);
+
+  await this.prisma.$transaction(async (tx) => {
+    const resetRecord = await tx.passwordResetToken.findUnique({
+      where: { tokenHash },
+    });
+
+    if (
+      !resetRecord ||
+      resetRecord.usedAt !== null ||
+      resetRecord.expiresAt <= now
+    ) {
+      throw new BadRequestException(
+        'This password reset link is invalid or has expired.',
+      );
+    }
+
+    const consumed = await tx.passwordResetToken.updateMany({
+      where: {
+        id: resetRecord.id,
+        usedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: {
+        usedAt: now,
+      },
+    });
+
+    if (consumed.count !== 1) {
+      throw new BadRequestException(
+        'This password reset link has already been used.',
+      );
+    }
+
+    await tx.account.update({
+      where: {
+        id: resetRecord.accountId,
+      },
+      data: {
+        passwordHash,
+      },
+    });
+
+    await tx.refreshSession.updateMany({
+      where: {
+        accountId: resetRecord.accountId,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: now,
+      },
+    });
+
+    // Invalidate any other outstanding password reset links.
+    await tx.passwordResetToken.updateMany({
+      where: {
+        accountId: resetRecord.accountId,
+        usedAt: null,
+      },
+      data: {
+        usedAt: now,
+      },
+    });
+  });
+
+  return {
+    message:
+      'Your password has been reset successfully. You can now sign in.',
+  };
+}
+async changePassword(
+  accountId: string,
+  currentPassword: string,
+  newPassword: string,
+) {
+  const account = await this.prisma.account.findUnique({
+    where: {
+      id: accountId,
+    },
+  });
+
+  if (!account || account.status !== 'ACTIVE') {
+    throw new UnauthorizedException(
+      'Account unavailable',
+    );
+  }
+
+  const passwordMatches = await compare(
+    currentPassword,
+    account.passwordHash,
+  );
+
+  if (!passwordMatches) {
+    throw new BadRequestException(
+      'Your current password is incorrect.',
+    );
+  }
+
+  const samePassword = await compare(
+    newPassword,
+    account.passwordHash,
+  );
+
+  if (samePassword) {
+    throw new BadRequestException(
+      'Your new password must be different from your current password.',
+    );
+  }
+
+  const newPasswordHash = await hash(
+    newPassword,
+    12,
+  );
+
+  const now = new Date();
+
+  await this.prisma.$transaction(async (tx) => {
+    await tx.account.update({
+      where: {
+        id: accountId,
+      },
+      data: {
+        passwordHash: newPasswordHash,
+      },
+    });
+
+    // Revoke all existing refresh sessions.
+    await tx.refreshSession.updateMany({
+      where: {
+        accountId,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: now,
+      },
+    });
+
+    // Invalidate outstanding password reset tokens.
+    await tx.passwordResetToken.updateMany({
+      where: {
+        accountId,
+        usedAt: null,
+      },
+      data: {
+        usedAt: now,
+      },
+    });
+  });
+
+  return {
+    message:
+      'Your password has been changed successfully. Please sign in again.',
+  };
 }
 
 }

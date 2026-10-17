@@ -6,6 +6,19 @@ export type SignedInAccount = {
   email: string
   role: string
   status: string
+
+  universityStudent?: {
+    universityId: string
+    fullName: string
+    major: {
+      id: string
+      name: string
+      faculty: {
+        id: string
+        name: string
+      }
+    }
+  } | null
 }
 
 type SignInProps = {

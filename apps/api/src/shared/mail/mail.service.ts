@@ -72,4 +72,27 @@ ClubHub Team
     throw error;
   }
 }
+async sendPasswordResetLink(
+  email: string,
+  resetLink: string,
+): Promise<void> {
+  await this.transporter.sendMail({
+    from: this.config.getOrThrow<string>('SMTP_FROM'),
+    to: email,
+    subject: 'ClubHub - Reset Your Password',
+    text: `
+You requested a password reset for your ClubHub account.
+
+Open the following link to create a new password:
+
+${resetLink}
+
+This link expires in 15 minutes.
+
+If you did not request this change, you can ignore this email.
+
+ClubHub Team
+    `.trim(),
+  });
+}
 }

@@ -13,7 +13,7 @@ import Clubs from './pages/Clubs'
 import Dashboard from './pages/Dashboard'
 import ClubPage from './pages/ClubPage'
 import Footer from './components/Footer'
-import DeanshipApp from './deanship/DeanshipApp'
+import StaffApp from './staff/StaffApp'
 import ChangePassword from './pages/ChangePassword'
 import StudentProfile from './pages/StudentProfile'
 
@@ -32,6 +32,7 @@ type Page =
   | 'password'
   | 'change-password'
   | 'profile'
+  | 'staff'
   
 
 type Session = {
@@ -134,11 +135,18 @@ useEffect(() => {
           expiresAt: Date.now() + result.expiresIn * 1000,
         })
 
-        if (account.role === 'DEANSHIP') {
-          setPage((currentPage) =>
-            currentPage === 'reset' ? 'reset' : 'admin'
-          )
-        }
+        if (
+            account.role === 'DEANSHIP' ||
+            account.role === 'SUPERVISOR'
+          ) {
+            setPage((currentPage) =>
+              currentPage === 'reset'
+                ? 'reset'
+                : account.role === 'DEANSHIP'
+                  ? 'admin'
+                  : 'staff'
+            )
+          }
       }
     } catch {
       // No valid session exists.
@@ -208,7 +216,13 @@ useEffect(() => {
     expiresAt: Date.now() + expiresIn * 1000,
   })
 
-  setPage(account.role === 'DEANSHIP' ? 'admin' : 'home')
+  setPage(
+  account.role === 'DEANSHIP'
+    ? 'admin'
+    : account.role === 'SUPERVISOR'
+      ? 'staff'
+      : 'home'
+)
 }
 
 async function handleSignOut() {
@@ -232,13 +246,32 @@ async function handleSignOut() {
   setPage('club')
   window.scrollTo(0, 0)
 }
-if (page === 'admin') {
-  if (!session || session.account.role !== 'DEANSHIP') {
+if (page === 'admin' || page === 'staff') {
+  if (
+    !session ||
+    !(
+      session.account.role === 'DEANSHIP' ||
+      session.account.role === 'SUPERVISOR'
+    )
+  ) {
+    return null
+  }
+
+  // Prevent a supervisor from rendering the
+  // Deanship administration route.
+  if (
+    (page === 'admin' && session.account.role !== 'DEANSHIP') ||
+    (page === 'staff' && session.account.role !== 'SUPERVISOR')
+  ) {
     return null
   }
 
   return (
-    <DeanshipApp
+    <StaffApp
+      role={session.account.role}
+      
+      name={session.account.supervisorProfile?.fullName}
+      accessToken={session.accessToken}
       onStudentSite={() => setPage('home')}
       onSignOut={handleSignOut}
     />
@@ -266,6 +299,8 @@ if (page === 'admin') {
           onDashboard={() => {
             if (session?.account.role === 'DEANSHIP') {
               setPage('admin')
+            } else if (session?.account.role === 'SUPERVISOR') {
+              setPage('staff')
             } else if (session?.account.role === 'STUDENT') {
               setPage('dashboard')
             } else {

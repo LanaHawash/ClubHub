@@ -12,6 +12,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ClubsModule } from './modules/clubs/clubs.module';
 import { EventsModule } from './modules/events/events.module';
 import { StudentsModule } from './modules/students/students.module';
+import { SupervisorsModule } from './modules/supervisors/supervisors.module';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { StudentsModule } from './modules/students/students.module';
     UniversityModule,
     AuthModule,
     StudentsModule,
-
+    SupervisorsModule,
     ThrottlerModule.forRoot([
       {
         ttl: 60000,

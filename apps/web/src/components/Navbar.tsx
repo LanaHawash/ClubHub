@@ -38,7 +38,10 @@ export default function Navbar({
    ...(authenticated
   ? [{
       id: 'dashboard' as const,
-      label: accountRole === 'DEANSHIP' ? 'Admin' : 'Dashboard',
+      label:
+  accountRole === 'DEANSHIP' || accountRole === 'SUPERVISOR'
+    ? 'Admin'
+    : 'Dashboard',
       action: onDashboard,
     }]
   : []),
@@ -74,12 +77,12 @@ export default function Navbar({
               <button type="button" onClick={() => navigate(
                 accountRole === 'STUDENT' ? onProfile : onDashboard
               )} aria-label={
-                accountRole === 'STUDENT'
-                  ? 'My profile'
-                  : accountRole === 'DEANSHIP'
-                    ? 'Admin interface'
-                    : 'My dashboard'
-              } title={signedInEmail} className="grid size-10 place-items-center rounded-full border-2 border-rose bg-lilac text-ink transition hover:ring-2 hover:ring-rose/40">
+                  accountRole === 'STUDENT'
+                    ? 'My profile'
+                    : accountRole === 'DEANSHIP' || accountRole === 'SUPERVISOR'
+                      ? 'Admin interface'
+                      : 'My dashboard'
+                } title={signedInEmail} className="grid size-10 place-items-center rounded-full border-2 border-rose bg-lilac text-ink transition hover:ring-2 hover:ring-rose/40">
                 <UserRound size={19} aria-hidden="true" />
               </button>
               <button type="button" onClick={() => navigate(onSignOut)} aria-label="Sign out" title="Sign out" className="hidden size-10 place-items-center rounded-full transition hover:bg-paper-2 md:grid">

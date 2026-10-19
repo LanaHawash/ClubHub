@@ -7,6 +7,10 @@ export type SignedInAccount = {
   role: string
   status: string
 
+  supervisorProfile?: {
+    fullName: string
+  } | null
+
   universityStudent?: {
     universityId: string
     fullName: string

@@ -570,6 +570,11 @@ async getCurrentUser(accountId: string) {
       role: true,
       status: true,
       profilePhotoUrl: true,
+      supervisorProfile: {
+        select: {
+          fullName: true,
+        },
+      },
       universityStudent: {
         select: {
           universityId: true,

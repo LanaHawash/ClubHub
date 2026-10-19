@@ -31,12 +31,13 @@ enum ClubStatus {
 }
 
 model Faculty {
-  id        String   @id @default(uuid()) @db.Uuid
-  name      String   @unique @db.VarChar(150)
-  majors    Major[]
-  clubs     Club[]
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  id          String              @id @default(uuid()) @db.Uuid
+  name        String              @unique @db.VarChar(150)
+  majors      Major[]
+  clubs       Club[]
+  supervisors SupervisorProfile[]
+  createdAt   DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime            @updatedAt @db.Timestamptz(6)
 }
 
 model Major {
@@ -66,19 +67,20 @@ model UniversityStudent {
 }
 
 model Account {
-  id                  String              @id @default(uuid()) @db.Uuid
-  email               String              @unique @db.VarChar(255)
-  passwordHash        String              @db.VarChar(255)
+  id                  String               @id @default(uuid()) @db.Uuid
+  email               String               @unique @db.VarChar(255)
+  passwordHash        String               @db.VarChar(255)
   role                AccountRole
-  status              AccountStatus       @default(ACTIVE)
-  universityStudentId String?             @unique @db.Uuid
-  universityStudent   UniversityStudent?  @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
-  profilePhotoUrl     String?             @db.Text
+  status              AccountStatus        @default(ACTIVE)
+  universityStudentId String?              @unique @db.Uuid
+  universityStudent   UniversityStudent?   @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
+  profilePhotoUrl     String?              @db.Text
   eventRegistrations  EventRegistration[]
   refreshSessions     RefreshSession[]
   passwordResets      PasswordResetToken[]
-  createdAt           DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt           DateTime            @updatedAt @db.Timestamptz(6)
+  supervisorProfile   SupervisorProfile?
+  createdAt           DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime             @updatedAt @db.Timestamptz(6)
 }
 
 model EmailVerification {
@@ -295,4 +297,20 @@ model PasswordResetToken {
   account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([accountId])
+}
+
+model SupervisorProfile {
+  id       String @id @default(uuid()) @db.Uuid
+  fullName String @db.VarChar(150)
+
+  accountId String  @unique @db.Uuid
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  facultyId String  @db.Uuid
+  faculty   Faculty @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([facultyId])
 }

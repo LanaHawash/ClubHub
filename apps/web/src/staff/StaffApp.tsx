@@ -9,6 +9,7 @@ import {
   UserCog,
   Users,
 } from 'lucide-react'
+import ClubsManagementPage from './ClubsManagementPage'
 import SupervisorsPage from './SupervisorsPage'
 type StaffRole = 'DEANSHIP' | 'SUPERVISOR'
 
@@ -174,6 +175,8 @@ export default function StaffApp({
       <main className="min-w-0 px-5 py-10 sm:px-8 lg:px-12">
         {isDeanship && section === 'supervisors' ? (
           <SupervisorsPage accessToken={accessToken} />
+        ) : isDeanship && section === 'clubs' ? (
+          <ClubsManagementPage accessToken={accessToken} />
         ) : (
           <>
         <div className="mx-auto max-w-5xl anim-rise">

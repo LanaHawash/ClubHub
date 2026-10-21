@@ -176,6 +176,75 @@ describe('update', () => {
       }),
     ).rejects.toThrow(ConflictException);
   });
+  it('updates supervisor information successfully', async () => {
+  const supervisorId = 'f0d828d2-2013-48ad-9147-393ad3bc4071';
+  const accountId = 'account-123';
+  const facultyId = '78723226-bf84-4275-a2f8-843c2b899523';
+
+  const updatedSupervisor = {
+    id: supervisorId,
+    fullName: 'Updated Supervisor',
+    facultyId,
+    account: {
+      email: 'updated@clubhub.local',
+      status: AccountStatus.ACTIVE,
+    },
+  };
+
+  prismaMock.supervisorProfile.findUnique.mockResolvedValue({
+    id: supervisorId,
+    accountId,
+  });
+
+  prismaMock.faculty.findUnique.mockResolvedValue({
+    id: facultyId,
+  });
+
+  const accountUpdate = jest.fn().mockResolvedValue({});
+  const profileUpdate = jest.fn().mockResolvedValue(
+    updatedSupervisor,
+  );
+
+  prismaMock.$transaction.mockImplementation(
+    async (callback) =>
+      callback({
+        account: {
+          update: accountUpdate,
+        },
+        supervisorProfile: {
+          update: profileUpdate,
+        },
+      }),
+  );
+
+  const result = await service.update(supervisorId, {
+    fullName: ' Updated Supervisor ',
+    email: ' UPDATED@CLUBHUB.LOCAL ',
+    facultyId,
+  });
+
+  expect(accountUpdate).toHaveBeenCalledWith({
+    where: {
+      id: accountId,
+    },
+    data: {
+      email: 'updated@clubhub.local',
+    },
+  });
+
+  expect(profileUpdate).toHaveBeenCalledWith({
+    where: {
+      id: supervisorId,
+    },
+    data: {
+      fullName: 'Updated Supervisor',
+      facultyId,
+    },
+    select: expect.any(Object),
+  });
+
+  expect(result).toEqual(updatedSupervisor);
+});
 });
   describe('updateStatus', () => {
     it('rejects an unknown supervisor', async () => {
@@ -190,6 +259,37 @@ describe('update', () => {
         ),
       ).rejects.toThrow(NotFoundException);
     });
+    it('reactivates a disabled supervisor account', async () => {
+  const supervisorId = 'supervisor-123';
+  const accountId = 'account-123';
+
+  prismaMock.supervisorProfile.findUnique.mockResolvedValue({
+    id: supervisorId,
+    accountId,
+  });
+
+  prismaMock.account.update.mockResolvedValue({
+    id: accountId,
+    status: AccountStatus.ACTIVE,
+  });
+
+  const result = await service.updateStatus(
+    supervisorId,
+    AccountStatus.ACTIVE,
+  );
+
+  expect(result.status).toBe(AccountStatus.ACTIVE);
+
+  expect(prismaMock.account.update).toHaveBeenCalledWith({
+    where: {
+      id: accountId,
+    },
+    data: {
+      status: AccountStatus.ACTIVE,
+    },
+    select: expect.any(Object),
+  });
+});
 
     it('deactivates a supervisor account', async () => {
       prismaMock.supervisorProfile.findUnique.mockResolvedValue({

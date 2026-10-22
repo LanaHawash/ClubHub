@@ -10,6 +10,7 @@ import {
   Users,
 } from 'lucide-react'
 import ClubsManagementPage from './ClubsManagementPage'
+import ClubManagementDetailPage from './ClubManagementDetailPage'
 import SupervisorsPage from './SupervisorsPage'
 type StaffRole = 'DEANSHIP' | 'SUPERVISOR'
 
@@ -38,6 +39,19 @@ export default function StaffApp({
   onSignOut,
 }: Props) {
   const [section, setSection] = useState<Section>('overview')
+  // Sprint 3: Track the selected club in Deanship management.
+  const [selectedClubId, setSelectedClubId] =
+  useState<string | null>(null) 
+
+    function openClubManagement(clubId: string) {
+      setSelectedClubId(clubId)
+      window.scrollTo(0, 0)
+    }
+
+    function backToClubs() {
+      setSelectedClubId(null)
+      window.scrollTo(0, 0)
+    }
 
   const isDeanship = role === 'DEANSHIP'
 
@@ -133,7 +147,10 @@ export default function StaffApp({
                 <button
                   key={key}
                   type="button"
-                  onClick={() => setSection(key)}
+                 onClick={() => {
+                    setSection(key)
+                    setSelectedClubId(null)
+                  }}
                   aria-current={active ? 'page' : undefined}
                   className={`flex shrink-0 items-center gap-3 whitespace-nowrap rounded-full px-4 py-2.5 text-sm font-semibold transition ${
                     active
@@ -176,7 +193,18 @@ export default function StaffApp({
         {isDeanship && section === 'supervisors' ? (
           <SupervisorsPage accessToken={accessToken} />
         ) : isDeanship && section === 'clubs' ? (
-          <ClubsManagementPage accessToken={accessToken} />
+          selectedClubId ? (
+            <ClubManagementDetailPage
+              clubId={selectedClubId}
+              accessToken={accessToken}
+              onBack={backToClubs}
+            />
+          ) : (
+            <ClubsManagementPage
+              accessToken={accessToken}
+              onClubSelect={openClubManagement}
+            />
+          )
         ) : (
           <>
         <div className="mx-auto max-w-5xl anim-rise">

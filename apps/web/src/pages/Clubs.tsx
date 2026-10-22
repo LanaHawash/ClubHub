@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Search } from 'lucide-react'
 import ClubCard, { scopeLabel, useClubs, type ClubScope } from '../components/ClubCard'
 
+const CLUBS_PER_PAGE = 6
 const categories = [
   { id: 'all', label: 'All clubs' },
   { id: 'major', label: 'By major' },
@@ -16,7 +17,9 @@ type ClubsProps = {
 export default function Clubs({ onClubClick }: ClubsProps) {
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<'all' | ClubScope>('all')
+  const [page, setPage] = useState(1)
   const { clubs, loading, error } = useClubs()
+  
 
   const query = search.trim().toLowerCase()
   const filteredClubs = clubs.filter((club) => {
@@ -26,6 +29,22 @@ export default function Clubs({ onClubClick }: ClubsProps) {
       club.description.toLowerCase().includes(query)
     return matchesCategory && matchesSearch
   })
+      const totalPages = Math.ceil(
+      filteredClubs.length / CLUBS_PER_PAGE
+    )
+
+    const currentPage = Math.min(
+      page,
+      Math.max(1, totalPages)
+    )
+
+    const startIndex =
+      (currentPage - 1) * CLUBS_PER_PAGE
+
+    const visibleClubs = filteredClubs.slice(
+      startIndex,
+      startIndex + CLUBS_PER_PAGE
+    )
 
   return (
     <div className="mx-auto max-w-7xl px-5 pb-24 pt-14 sm:px-8">
@@ -45,7 +64,10 @@ export default function Clubs({ onClubClick }: ClubsProps) {
             aria-label="Search clubs"
             placeholder="Search clubs, majors, interests"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+            setSearch(event.target.value)
+            setPage(1)
+          }}
             className="w-full rounded-2xl border border-ink/15 bg-card py-3 pl-11 pr-4 text-ink outline-none focus:border-ink"
           />
         </div>
@@ -54,7 +76,10 @@ export default function Clubs({ onClubClick }: ClubsProps) {
             <button
               key={item.id}
               type="button"
-              onClick={() => setCategory(item.id)}
+             onClick={() => {
+              setCategory(item.id)
+              setPage(1)
+            }}
               aria-pressed={category === item.id}
               className={`shrink-0 rounded-full border px-4 py-2 text-sm font-semibold capitalize transition ${
                 category === item.id
@@ -73,7 +98,7 @@ export default function Clubs({ onClubClick }: ClubsProps) {
       {!loading && !error && (
         filteredClubs.length ? (
           <div className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredClubs.map((club) => (
+            {visibleClubs.map((club) => (
               <ClubCard
   key={club.id}
   club={{ ...club, scope: scopeLabel(club.scope) }}
@@ -89,6 +114,52 @@ export default function Clubs({ onClubClick }: ClubsProps) {
           </p>
         )
       )}
+      {!loading && !error && totalPages > 1 && (
+  <nav
+    aria-label="Club pagination"
+    className="mt-12 flex flex-wrap items-center justify-center gap-3"
+  >
+    <button
+      type="button"
+      disabled={currentPage === 1}
+      onClick={() => setPage(currentPage - 1)}
+      className="rounded-full border border-ink/20 px-5 py-2 text-sm font-semibold transition hover:border-ink disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      Previous
+    </button>
+
+    {Array.from(
+      { length: totalPages },
+      (_, index) => index + 1,
+    ).map((pageNumber) => (
+      <button
+        key={pageNumber}
+        type="button"
+        onClick={() => setPage(pageNumber)}
+        aria-label={`Go to page ${pageNumber}`}
+        aria-current={
+          currentPage === pageNumber ? 'page' : undefined
+        }
+        className={`grid size-10 place-items-center rounded-full text-sm font-semibold transition ${
+          currentPage === pageNumber
+            ? 'bg-ink text-paper'
+            : 'border border-ink/20 hover:border-ink'
+        }`}
+      >
+        {pageNumber}
+      </button>
+    ))}
+
+    <button
+      type="button"
+      disabled={currentPage === totalPages}
+      onClick={() => setPage(currentPage + 1)}
+      className="rounded-full border border-ink/20 px-5 py-2 text-sm font-semibold transition hover:border-ink disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      Next
+    </button>
+  </nav>
+)}
     </div>
   )
 }

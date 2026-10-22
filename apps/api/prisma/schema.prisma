@@ -79,6 +79,7 @@ model Account {
   refreshSessions     RefreshSession[]
   passwordResets      PasswordResetToken[]
   supervisorProfile   SupervisorProfile?
+  club                Club?
   createdAt           DateTime             @default(now()) @db.Timestamptz(6)
   updatedAt           DateTime             @updatedAt @db.Timestamptz(6)
 }
@@ -105,6 +106,10 @@ model Club {
   classification ClubClassification
   facultyId      String?             @db.Uuid
   faculty        Faculty?            @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  supervisorId   String?             @db.Uuid
+  supervisor     SupervisorProfile?  @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
+  adminAccountId String?             @unique @db.Uuid
+  adminAccount   Account?            @relation(fields: [adminAccountId], references: [id], onDelete: Restrict)
   status         ClubStatus          @default(ACTIVE)
   foundedYear    Int?
   contactEmail   String              @db.VarChar(255)
@@ -308,6 +313,8 @@ model SupervisorProfile {
 
   facultyId String  @db.Uuid
   faculty   Faculty @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+
+  clubs Club[]
 
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)

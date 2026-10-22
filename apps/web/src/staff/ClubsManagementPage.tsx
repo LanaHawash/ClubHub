@@ -15,9 +15,15 @@ type Club = {
   foundedYear: number | null
   faculty: { id: string; name: string } | null
   eligibleMajors: { major: { id: string; name: string } }[]
+  supervisorId: string | null
+  supervisor: {
+    id: string
+    fullName: string
+  } | null
 }
 type Faculty = { id: string; name: string }
 type Major = { id: string; name: string; facultyId: string }
+
 
 function eligibilityLabel(club: Club): string {
   if (club.classification === 'GENERAL') return 'All students'
@@ -28,10 +34,65 @@ function eligibilityLabel(club: Club): string {
   return majors.length ? majors.join(', ') : 'No eligible majors specified'
 }
 
-type ClubsManagementPageProps = { accessToken: string }
+type ClubsManagementPageProps = {
+  accessToken: string
+  onClubSelect: (clubId: string) => void
+}
+type PaginatedClubsResponse = {
+  data: Club[]
+  meta: {
+    page: number
+    limit: number
+    total: number
+    totalPages: number
+  }
+}
 
-export default function ClubsManagementPage({ accessToken }: ClubsManagementPageProps) {
+async function fetchAllClubs(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<Club[]> {
+  const allClubs: Club[] = []
+
+  let page = 1
+  let totalPages = 1
+
+  do {
+    const response = await fetch(
+      `/api/clubs/admin/all?page=${page}&limit=100`,
+      {
+        signal,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+    )
+
+    if (!response.ok) {
+      throw new Error(
+        `Unable to load clubs (${response.status}).`,
+      )
+    }
+
+    const result: PaginatedClubsResponse =
+      await response.json()
+
+    allClubs.push(...result.data)
+
+    totalPages = result.meta.totalPages
+    page++
+  } while (page <= totalPages)
+
+  return allClubs
+}
+
+export default function ClubsManagementPage({
+  accessToken,
+  onClubSelect,
+}: ClubsManagementPageProps) {
   const [clubs, setClubs] = useState<Club[]>([])
+ 
+  const [statusFilter, setStatusFilter] = useState<'ACTIVE' | 'ARCHIVED'>('ACTIVE')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showAddClub, setShowAddClub] = useState(false)
@@ -45,6 +106,7 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
   const [formError, setFormError] = useState('')
   const [saving, setSaving] = useState(false)
 
+ 
   const [faculties, setFaculties] = useState<Faculty[]>([])
   const [majors, setMajors] = useState<Major[]>([])
   const [universityDataLoading, setUniversityDataLoading] = useState(true)
@@ -63,10 +125,13 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
       setLoading(true)
       setError('')
       try {
-        const response = await fetch('/api/clubs', { signal: controller.signal })
-        if (!response.ok) throw new Error('Unable to load clubs.')
-        const data: Club[] = await response.json()
-        if (!controller.signal.aborted) setClubs(data)
+      const data = await fetchAllClubs(
+        accessToken,
+        controller.signal,
+      )
+        if (!controller.signal.aborted) {
+          setClubs(data)
+        }
       } catch (err) {
         if (!controller.signal.aborted) {
           setError(err instanceof Error ? err.message : 'Unable to load clubs.')
@@ -78,6 +143,8 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
     void loadClubs()
     return () => controller.abort()
   }, [])
+// Sprint 3.4: Load supervisors for club assignments.
+
 
   useEffect(() => {
     const controller = new AbortController()
@@ -128,22 +195,7 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
     setShowAddClub(true)
   }
 
-  function openEditClub(club: Club) {
-    setEditingClubId(club.id)
-    setClassification(club.classification)
-    setName(club.name)
-    setDescription(club.description)
-    setContactEmail(club.contactEmail)
-    setLogoUrl(club.logoUrl ?? '')
-    setFoundedYear(club.foundedYear?.toString() ?? '')
-    setFacultyId(club.faculty?.id ?? '')
-    setSelectedMajorIds(club.eligibleMajors.map((entry) => entry.major.id))
-    setFormError('')
-    setFacultyListOpen(false)
-    setMajorPickerOpen(false)
-    setShowAddClub(true)
-  }
-
+ 
   function openMajorPicker() {
     setDraftMajorIds([...selectedMajorIds])
     setMajorSearch('')
@@ -203,14 +255,15 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
         const detail = Array.isArray(body.message) ? body.message.join(' ') : body.message
         throw new Error(detail || `Unable to save club (${response.status}).`)
       }
-      const listResponse = await fetch('/api/clubs')
-      if (listResponse.ok) {
-        const list: Club[] = await listResponse.json()
-        setClubs(list)
-        setError('')
-      } else {
-        setError('Club saved, but the club list could not be refreshed. Reload the page.')
-      }
+     try {
+      const list = await fetchAllClubs(accessToken)
+      setClubs(list)
+      setError('')
+    } catch {
+      setError(
+        'Club saved, but the club list could not be refreshed. Reload the page.',
+      )
+    }
       setShowAddClub(false)
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to save club.')
@@ -218,6 +271,26 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
       setSaving(false)
     }
   }
+
+// Sprint 3.3: Separate active and archived clubs.
+const activeClubs = clubs.filter(
+  (club) => club.status === 'ACTIVE'
+)
+
+const archivedClubs = clubs.filter(
+  (club) => club.status === 'ARCHIVED'
+)
+
+const visibleClubs =
+  statusFilter === 'ACTIVE'
+    ? activeClubs
+    : archivedClubs
+
+// Sprint 3.3: Archive or reactivate a club.
+ 
+
+// Sprint 3.4: Assign or reassign a club supervisor.
+ 
 
   const selectedFaculty = faculties.find((faculty) => faculty.id === facultyId)
   const selectedMajors = selectedMajorIds
@@ -237,30 +310,107 @@ export default function ClubsManagementPage({ accessToken }: ClubsManagementPage
         </button>
       </div>
 
-      <div className="mb-6 flex gap-2">
-        <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-paper">Active · {clubs.length}</span>
-        <span className="rounded-full bg-ink/5 px-4 py-2 text-sm font-semibold text-ink-2 opacity-60" title="Archived clubs will be available in Story 3.3">Archived</span>
-      </div>
+      {/* Sprint 3.3: Active and Archived filters */}
+<div className="mb-6 flex gap-2">
+
+  <button
+    type="button"
+    onClick={() => setStatusFilter('ACTIVE')}
+    aria-pressed={statusFilter === 'ACTIVE'}
+    className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+      statusFilter === 'ACTIVE'
+        ? 'bg-ink text-paper'
+        : 'bg-ink/5 text-ink-2 hover:bg-ink/10'
+    }`}
+  >
+    Active · {activeClubs.length}
+  </button>
+
+  <button
+    type="button"
+    onClick={() => setStatusFilter('ARCHIVED')}
+    aria-pressed={statusFilter === 'ARCHIVED'}
+    className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+      statusFilter === 'ARCHIVED'
+        ? 'bg-ink text-paper'
+        : 'bg-ink/5 text-ink-2 hover:bg-ink/10'
+    }`}
+  >
+    Archived · {archivedClubs.length}
+  </button>
+
+</div>
+
       {error && <p role="alert" className="mb-5 rounded-2xl border border-rose/20 bg-rose/10 p-4 text-sm text-rose">{error}</p>}
       <div className="overflow-x-auto rounded-3xl border border-ink/10 bg-card">
         <table className="w-full min-w-[40rem] text-left text-sm">
-          <thead className="border-b border-ink/10 text-xs uppercase tracking-wider text-ink-2">
-            <tr><th className="p-4 font-semibold">Club</th><th className="p-4 font-semibold">Supervisor</th><th className="p-4 font-semibold">Members</th><th className="p-4 font-semibold">Admin account</th><th className="p-4 font-semibold">Actions</th></tr>
-          </thead>
-          <tbody className="divide-y divide-ink/10">
-            {loading && <tr><td colSpan={5} className="p-6 text-center text-ink-2">Loading clubs...</td></tr>}
-            {!loading && !error && clubs.length === 0 && <tr><td colSpan={5} className="p-6 text-center text-ink-2">No active clubs found.</td></tr>}
-            {!loading && !error && clubs.map((club) => (
-              <tr key={club.id} className="transition hover:bg-paper">
-                <td className="p-4"><p className="font-semibold">{club.name}</p><p className="mt-1 max-w-sm text-xs text-ink-2">{eligibilityLabel(club)}</p></td>
-                <td className="p-4 text-ink-2">Not assigned yet</td>
-                <td className="p-4 text-ink-2">—</td>
-                <td className="p-4 text-xs text-ink-2">Not created yet</td>
-                <td className="p-4"><button type="button" onClick={() => openEditClub(club)} className="rounded-full border border-ink/20 px-4 py-2 text-xs font-semibold hover:bg-ink/5">Edit</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+  <thead className="border-b border-ink/10 text-xs uppercase tracking-wider text-ink-2">
+    <tr>
+      <th className="p-4 font-semibold">Club</th>
+      <th className="p-4 font-semibold">Supervisor</th>
+      <th className="p-4 font-semibold">Members</th>
+      <th className="p-4 font-semibold">Admin account</th>
+    </tr>
+  </thead>
+
+  <tbody className="divide-y divide-ink/10">
+    {loading && (
+      <tr>
+        <td colSpan={4} className="p-6 text-center text-ink-2">
+          Loading clubs...
+        </td>
+      </tr>
+    )}
+
+    {!loading && !error && visibleClubs.length === 0 && (
+      <tr>
+        <td colSpan={4} className="p-6 text-center text-ink-2">
+          No {statusFilter.toLowerCase()} clubs found.
+        </td>
+      </tr>
+    )}
+
+    {!loading &&
+      !error &&
+      visibleClubs.map((club) => (
+        <tr
+          key={club.id}
+          onClick={() => onClubSelect(club.id)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              onClubSelect(club.id)
+            }
+          }}
+          tabIndex={0}
+          aria-label={`Manage ${club.name}`}
+          className="cursor-pointer transition hover:bg-paper focus-visible:bg-paper focus-visible:outline focus-visible:outline-2 focus-visible:outline-plum"
+        >
+          <td className="p-4">
+            <p className="font-semibold text-ink">
+              {club.name}
+            </p>
+
+            <p className="mt-1 max-w-sm text-xs text-ink-2">
+              {eligibilityLabel(club)}
+            </p>
+          </td>
+
+          <td className="p-4 text-sm text-ink-2">
+            {club.supervisor?.fullName ?? 'Not assigned'}
+          </td>
+
+          <td className="p-4 text-sm text-ink-2">
+            —
+          </td>
+
+          <td className="p-4 text-xs text-ink-2">
+            Not created yet
+          </td>
+        </tr>
+      ))}
+  </tbody>
+</table>
       </div>
 
       {showAddClub && createPortal(

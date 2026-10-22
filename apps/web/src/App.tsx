@@ -16,6 +16,7 @@ import Footer from './components/Footer'
 import StaffApp from './staff/StaffApp'
 import ChangePassword from './pages/ChangePassword'
 import StudentProfile from './pages/StudentProfile'
+import ClubAdminDashboard from './staff/ClubAdminDashboard'
 
 type Page =
   | 'home'
@@ -24,6 +25,7 @@ type Page =
   | 'events'
   | 'dashboard'
   | 'admin'
+  | 'club-admin'
   | 'signin'
   | 'signup'
   | 'forgot'
@@ -137,15 +139,18 @@ useEffect(() => {
 
         if (
             account.role === 'DEANSHIP' ||
-            account.role === 'SUPERVISOR'
+            account.role === 'SUPERVISOR' ||
+            account.role === 'CLUB'
           ) {
-            setPage((currentPage) =>
-              currentPage === 'reset'
-                ? 'reset'
-                : account.role === 'DEANSHIP'
-                  ? 'admin'
-                  : 'staff'
-            )
+          setPage((currentPage) =>
+  currentPage === 'reset'
+    ? 'reset'
+    : account.role === 'DEANSHIP'
+      ? 'admin'
+      : account.role === 'SUPERVISOR'
+        ? 'staff'
+        : 'club-admin'
+)
           }
       }
     } catch {
@@ -216,12 +221,16 @@ useEffect(() => {
     expiresAt: Date.now() + expiresIn * 1000,
   })
 
-  setPage(
+setPage(
   account.role === 'DEANSHIP'
     ? 'admin'
     : account.role === 'SUPERVISOR'
       ? 'staff'
-      : 'home'
+      : account.role === 'CLUB'
+        ? 'club-admin'
+        : account.role === 'STUDENT'
+          ? 'dashboard'
+          : 'home'
 )
 }
 
@@ -246,6 +255,20 @@ async function handleSignOut() {
   setPage('club')
   window.scrollTo(0, 0)
 }
+
+if (page === 'club-admin') {
+  if (!session || session.account.role !== 'CLUB') {
+    return null
+  }
+
+  return (
+    <ClubAdminDashboard
+      accessToken={session.accessToken}
+      onSignOut={handleSignOut}
+    />
+  )
+}
+
 if (page === 'admin' || page === 'staff') {
   if (
     !session ||
@@ -301,6 +324,9 @@ if (page === 'admin' || page === 'staff') {
               setPage('admin')
             } else if (session?.account.role === 'SUPERVISOR') {
               setPage('staff')
+            }
+            else if (session?.account.role === 'CLUB') {
+              setPage('club-admin')
             } else if (session?.account.role === 'STUDENT') {
               setPage('dashboard')
             } else {

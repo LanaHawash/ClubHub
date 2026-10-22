@@ -31,6 +31,15 @@ type ApiClub = {
   logoUrl: string | null
 }
 
+type PaginatedClubsResponse = {
+  data: ApiClub[]
+  meta: {
+    page: number
+    limit: number
+    total: number
+    totalPages: number
+  }
+}
 export function scopeLabel(scope: ClubScope): string {
   return scope === 'major'
     ? 'By major'
@@ -51,23 +60,51 @@ export function useClubs() {
     async function loadClubs() {
       try {
         setLoading(true)
-        const response = await fetch('/api/clubs', { signal: controller.signal })
-        if (!response.ok) throw new Error('Could not load clubs. Check that the API is running.')
+       // Fetch the first page of active clubs.
+const response = await fetch(
+  '/api/clubs?page=1&limit=100',
+  { signal: controller.signal },
+)
 
-        const result: ApiClub[] = await response.json()
-        const active = result
-          .filter((club) => club.status === 'ACTIVE')
-          .map((club): Club => ({
-            id: club.id,
-            name: club.name,
-            description: club.description,
-            scope: club.classification === 'MAJOR_BASED'
-              ? 'major'
-              : club.classification === 'FACULTY_BASED'
-                ? 'faculty'
-                : 'general',
-            imageUrl: club.logoUrl || undefined,
-          }))
+if (!response.ok) {
+  throw new Error('Could not load clubs. Check that the API is running.')
+}
+
+const result: PaginatedClubsResponse = await response.json()
+
+const allClubs = [...result.data]
+
+// Retrieve additional pages when more than 100 clubs exist.
+for (let page = 2; page <= result.meta.totalPages; page++) {
+  const nextResponse = await fetch(
+    `/api/clubs?page=${page}&limit=100`,
+    { signal: controller.signal },
+  )
+
+  if (!nextResponse.ok) {
+    throw new Error('Could not load additional clubs.')
+  }
+
+  const nextResult: PaginatedClubsResponse =
+    await nextResponse.json()
+
+  allClubs.push(...nextResult.data)
+}
+
+    // Convert API records to the format used by our React components.
+    const active = allClubs
+      .filter((club) => club.status === 'ACTIVE')
+      .map((club): Club => ({
+        id: club.id,
+        name: club.name,
+        description: club.description,
+        scope: club.classification === 'MAJOR_BASED'
+          ? 'major'
+          : club.classification === 'FACULTY_BASED'
+            ? 'faculty'
+            : 'general',
+        imageUrl: club.logoUrl || undefined,
+      }))
         if (!controller.signal.aborted) {
           setClubs(active)
           setError(null)

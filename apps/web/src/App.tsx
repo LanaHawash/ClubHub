@@ -47,6 +47,17 @@ type RefreshResponse = {
   expiresIn: number
 }
 
+type ClubAdminAssignment = {
+  id: string
+  clubId: string
+  position: 'PRESIDENT' | 'SECOND_ADMIN'
+  club: {
+    id: string
+    name: string
+    logoUrl: string | null
+  }
+}
+
 let refreshPromise: Promise<RefreshResponse> | null = null
 
 function refreshAccessToken(): Promise<RefreshResponse> {
@@ -104,8 +115,12 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [selectedClubId, setSelectedClubId] = useState<string | null>(null)
 
-const sessionVersionRef = useRef(0)
+  const sessionVersionRef = useRef(0)
+  const [clubAdminAssignment, setClubAdminAssignment] =
+    useState<ClubAdminAssignment | null>(null)
 
+  const [managedClubId, setManagedClubId] =
+    useState<string | null>(null)
 useEffect(() => {
   let cancelled = false
   const version = sessionVersionRef.current
@@ -207,7 +222,58 @@ useEffect(() => {
     window.clearTimeout(timeout)
   }
 }, [session])
+useEffect(() => {
+  if (!session || session.account.role !== 'STUDENT') {
+    setClubAdminAssignment(null)
+    return
+  }
 
+  const controller = new AbortController()
+  const accessToken = session.accessToken
+
+  async function loadAssignment() {
+    try {
+      const response = await fetch(
+        '/api/clubs/my-admin-assignments',
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+          signal: controller.signal,
+          cache: 'no-store',
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error('Unable to load club assignment')
+      }
+
+      const assignments: ClubAdminAssignment[] =
+        await response.json()
+
+      if (!controller.signal.aborted) {
+        setClubAdminAssignment(assignments[0] ?? null)
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        setClubAdminAssignment(null)
+      }
+    }
+  }
+
+  void loadAssignment()
+
+  const refreshOnFocus = () => {
+    void loadAssignment()
+  }
+
+  window.addEventListener('focus', refreshOnFocus)
+
+  return () => {
+    controller.abort()
+    window.removeEventListener('focus', refreshOnFocus)
+  }
+}, [session?.account.id, session?.account.role, session?.accessToken])
   function handleSignedIn(
   account: SignedInAccount,
   accessToken: string,
@@ -228,9 +294,7 @@ setPage(
       ? 'staff'
       : account.role === 'CLUB'
         ? 'club-admin'
-        : account.role === 'STUDENT'
-          ? 'dashboard'
-          : 'home'
+        : 'home'
 )
 }
 
@@ -257,14 +321,19 @@ async function handleSignOut() {
 }
 
 if (page === 'club-admin') {
-  if (!session || session.account.role !== 'CLUB') {
+  if (
+    !session ||
+    session.account.role !== 'STUDENT' ||
+    !managedClubId
+  ) {
     return null
   }
 
   return (
     <ClubAdminDashboard
       accessToken={session.accessToken}
-      onSignOut={handleSignOut}
+      clubId={managedClubId}
+      onBack={() => setPage('dashboard')}
     />
   )
 }
@@ -342,6 +411,16 @@ if (page === 'admin' || page === 'staff') {
           }}
           signedInEmail={session?.account.email}
           onSignOut={handleSignOut}
+
+          hasClubAdminAccess={Boolean(clubAdminAssignment)}
+
+          onManageClub={() => {
+            if (!clubAdminAssignment) return
+
+            setManagedClubId(clubAdminAssignment.clubId)
+            setPage('club-admin')
+            window.scrollTo(0, 0)
+          }}
         />
                 <main className="flex-1">
         {page === 'home' ? (

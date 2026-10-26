@@ -1,8 +1,9 @@
 import type { FormEvent } from 'react'
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, ChevronDown, Plus, X } from 'lucide-react'
-
+import { Plus, X, Trash2 } from 'lucide-react'
+import ClubLabelsPicker from './ClubLabelsPicker'
+import type { ClubLabelsSelection } from './ClubLabelsPicker'
 type ClubClassification = 'GENERAL' | 'FACULTY_BASED' | 'MAJOR_BASED'
 type Club = {
   id: string
@@ -23,7 +24,15 @@ type Club = {
 }
 type Faculty = { id: string; name: string }
 type Major = { id: string; name: string; facultyId: string }
-
+type BoardMember = { name: string; role: string; phone: string }
+type Supervisor = {
+  id: string
+  fullName: string
+  account?: {
+    status: string
+    role: string
+  }
+}
 
 function eligibilityLabel(club: Club): string {
   if (club.classification === 'GENERAL') return 'All students'
@@ -114,11 +123,27 @@ export default function ClubsManagementPage({
   const [facultyId, setFacultyId] = useState('')
   const [selectedMajorIds, setSelectedMajorIds] = useState<string[]>([])
 
-  const [facultyListOpen, setFacultyListOpen] = useState(false)
-  const [majorPickerOpen, setMajorPickerOpen] = useState(false)
-  const [draftMajorIds, setDraftMajorIds] = useState<string[]>([])
-  const [majorSearch, setMajorSearch] = useState('')
+  const [clubLabels, setClubLabels] = useState<ClubLabelsSelection>({
+    labelIds: [],
+    newLabels: [],
+  })
 
+  // Board and membership inputs follow the original Figma structure.
+  // Their persistence belongs to later sprints and is deliberately not simulated.
+  const [board, setBoard] = useState<BoardMember[]>([
+    { name: '', role: 'President', phone: '' },
+    { name: '', role: 'Vice President', phone: '' },
+  ])
+  const [boardAdmins, setBoardAdmins] = useState<string[]>(['', ''])
+  const [firstFee, setFirstFee] = useState('')
+  const [renewalFee, setRenewalFee] = useState('')
+  const [windowEnabled, setWindowEnabled] = useState(false)
+  const [windowStart, setWindowStart] = useState('')
+  const [windowEnd, setWindowEnd] = useState('')
+  const [supervisors, setSupervisors] = useState<Supervisor[]>([])
+  const [supervisorId, setSupervisorId] = useState('')
+  const [supervisorsLoading, setSupervisorsLoading] = useState(true)
+  const [supervisorsError, setSupervisorsError] = useState('')
   useEffect(() => {
     const controller = new AbortController()
     async function loadClubs() {
@@ -179,6 +204,57 @@ export default function ClubsManagementPage({
     return () => controller.abort()
   }, [])
 
+  useEffect(() => {
+  const controller = new AbortController()
+
+  async function loadSupervisors() {
+    setSupervisorsLoading(true)
+    setSupervisorsError('')
+
+    try {
+      const response = await fetch('/api/supervisors', {
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      })
+
+      if (!response.ok) {
+        throw new Error(
+          `Unable to load supervisors (${response.status}).`
+        )
+      }
+
+      const data: Supervisor[] = await response.json()
+
+      if (!controller.signal.aborted) {
+        setSupervisors(
+          data.filter(
+            (supervisor) =>
+              supervisor.account?.status === 'ACTIVE'
+          )
+        )
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setSupervisorsError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to load supervisors.'
+        )
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setSupervisorsLoading(false)
+      }
+    }
+  }
+
+  void loadSupervisors()
+
+  return () => controller.abort()
+}, [accessToken])
+
   function openAddClub() {
     setEditingClubId(null)
     setClassification('GENERAL')
@@ -190,18 +266,22 @@ export default function ClubsManagementPage({
     setFormError('')
     setFacultyId('')
     setSelectedMajorIds([])
-    setFacultyListOpen(false)
-    setMajorPickerOpen(false)
     setShowAddClub(true)
+    setClubLabels({
+      labelIds: [],
+      newLabels: [],
+    })
+    setSupervisorId('')
+    setBoard([{ name: '', role: 'President', phone: '' }, { name: '', role: 'Vice President', phone: '' }])
+    setBoardAdmins(['', ''])
+    setFirstFee('')
+    setRenewalFee('')
+    setWindowEnabled(false)
+    setWindowStart('')
+    setWindowEnd('')
   }
 
  
-  function openMajorPicker() {
-    setDraftMajorIds([...selectedMajorIds])
-    setMajorSearch('')
-    setMajorPickerOpen(true)
-  }
-
   async function saveClub(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (saving) return
@@ -240,8 +320,11 @@ export default function ClubsManagementPage({
           description: description.trim(),
           contactEmail: contactEmail.trim().toLowerCase(),
           classification,
+          labelIds: clubLabels.labelIds,
+          newLabels: clubLabels.newLabels,
           facultyId: classification === 'FACULTY_BASED' ? facultyId : null,
           eligibleMajorIds: classification === 'MAJOR_BASED' ? selectedMajorIds : [],
+          supervisorId: supervisorId || null,
           ...(editingClubId
             ? { logoUrl: logoUrl.trim() || null, foundedYear: year ?? null }
             : {
@@ -292,10 +375,6 @@ const visibleClubs =
 // Sprint 3.4: Assign or reassign a club supervisor.
  
 
-  const selectedFaculty = faculties.find((faculty) => faculty.id === facultyId)
-  const selectedMajors = selectedMajorIds
-    .map((id) => majors.find((major) => major.id === id))
-    .filter((major): major is Major => major !== undefined)
 
   return (
     <section className="mx-auto max-w-5xl anim-rise">
@@ -414,169 +493,84 @@ const visibleClubs =
       </div>
 
       {showAddClub && createPortal(
-        <div className="fixed inset-y-0 right-0 left-0 z-50 flex items-center justify-center overflow-hidden bg-ink/60 p-3 sm:p-5 lg:left-[17rem]">
-          <div role="dialog" aria-modal="true" aria-labelledby="club-form-title" className="w-full max-w-3xl max-h-[calc(100dvh-1.5rem)] overflow-y-auto overscroll-contain rounded-3xl bg-paper p-6 shadow-2xl sm:max-h-[calc(100dvh-2.5rem)] sm:p-8" style={{ scrollbarWidth: 'thin', scrollbarColor: '#8b7c96 transparent' }}>
-            <div className="mb-6 flex items-start justify-between gap-4">
-              <div>
-                <p className="mb-2 font-mono text-xs uppercase tracking-widest text-rose">Club management</p>
-                <h2 id="club-form-title" className="font-display text-4xl text-ink">{editingClubId ? 'Edit club' : 'Add a club'}</h2>
-                <p className="mt-2 text-sm text-ink-2">{editingClubId ? 'Update this club without changing its ID or events.' : 'Create a new university club.'}</p>
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/60 p-0 backdrop-blur-sm sm:items-center sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowAddClub(false) }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="club-form-title" className="anim-pop relative max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-t-3xl bg-card p-6 shadow-2xl sm:rounded-3xl sm:p-8">
+            <button type="button" onClick={() => setShowAddClub(false)} aria-label="Close" className="absolute right-4 top-4 grid size-9 place-items-center rounded-full bg-paper-2 hover:bg-ink hover:text-paper"><X size={16} /></button>
+            <h2 id="club-form-title" className="pr-8 font-display text-4xl leading-tight">Add a club</h2>
+            <form onSubmit={saveClub}>
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <label className="block"><span className="mb-1.5 block text-sm font-semibold">Club name</span><input required minLength={2} maxLength={150} value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3 outline-none focus:border-ink focus:ring-4 focus:ring-rose/25" /></label>
+                <label className="block"><span className="mb-1.5 block text-sm font-semibold">Supervisor</span><select value={supervisorId} onChange={(e) => setSupervisorId(e.target.value)} disabled={supervisorsLoading || saving} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3 outline-none focus:border-ink focus:ring-4 focus:ring-rose/25"><option value="">Choose…</option>{supervisors.map((item) => <option key={item.id} value={item.id}>{item.fullName}</option>)}</select>{supervisorsError && <span role="alert" className="text-xs text-rose">{supervisorsError}</span>}</label>
               </div>
-              <button type="button" onClick={() => setShowAddClub(false)} aria-label="Close club form" className="rounded-full border border-ink/20 p-2 hover:bg-ink/5"><X size={19} /></button>
-            </div>
-            <form id="club-form" onSubmit={saveClub} className="space-y-5">
-              <label className="block">
-                <span className="mb-2 block text-sm font-semibold">Club name</span>
-                <input type="text" required minLength={2} maxLength={150} value={name} onChange={(event) => setName(event.target.value)} placeholder="Enter club name" className="w-full rounded-xl border border-line bg-card px-4 py-3 outline-none focus:border-plum focus:ring-2 focus:ring-plum/20" />
-              </label>
-              <label className="block">
-                <span className="mb-2 block text-sm font-semibold">Description</span>
-                <textarea required rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What does this club do?" className="w-full resize-y rounded-xl border border-line bg-card px-4 py-3 outline-none focus:border-plum focus:ring-2 focus:ring-plum/20" />
-              </label>
-              <label className="block">
-                <span className="mb-2 block text-sm font-semibold">Contact email</span>
-                <input required type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} placeholder="club@example.edu" className="w-full rounded-xl border border-line bg-card px-4 py-3 outline-none focus:border-plum focus:ring-2 focus:ring-plum/20" />
-              </label>
-              <details className="rounded-2xl border border-ink/10 bg-card p-4">
-                <summary className="cursor-pointer text-sm font-semibold">Additional club details (optional)</summary>
-                <div className="mt-4 grid gap-4">
-                  <label className="block"><span className="mb-2 block text-sm font-semibold">Logo URL</span><input type="url" value={logoUrl} onChange={(event) => setLogoUrl(event.target.value)} placeholder="https://..." className="w-full rounded-xl border border-line bg-paper px-4 py-3" /></label>
-                  <label className="block"><span className="mb-2 block text-sm font-semibold">Founded year</span><input type="number" min={1800} max={2100} value={foundedYear} onChange={(event) => setFoundedYear(event.target.value)} className="w-full rounded-xl border border-line bg-paper px-4 py-3" /></label>
-                </div>
-              </details>
-              <div className="rounded-2xl border border-dashed border-ink/20 bg-card p-5">
-                <p className="text-sm font-semibold">Supervisor</p>
-                <p className="mt-2 text-sm text-ink-2">Supervisor assignment will be available in Story 3.4.</p>
-                <select disabled className="mt-3 w-full rounded-xl border border-line bg-paper px-4 py-3 text-ink-2 opacity-60"><option>Assign supervisor later</option></select>
+              <p className="mb-2 mt-6 text-sm font-semibold">Who can join</p>
+              <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Club category">
+                {([
+                  ['MAJOR_BASED', 'Major club', 'Only chosen majors'],
+                  ['FACULTY_BASED', 'Faculty club', 'One whole faculty'],
+                  ['GENERAL', 'University-wide club', 'Every student'],
+                ] as const).map(([value, title, subtitle]) => (
+                  <button key={value} type="button" role="radio" aria-checked={classification === value} onClick={() => setClassification(value)} className={'rounded-2xl border-2 p-3 text-left transition ' + (classification === value ? 'border-ink bg-paper' : 'border-ink/15 hover:border-ink/40')}><span className="block font-semibold">{title}</span><span className="text-xs text-ink-2">{subtitle}</span></button>
+                ))}
               </div>
-              <div className="rounded-2xl border border-ink/10 bg-card p-5">
-                <p className="text-sm font-semibold text-ink">Who can join?</p>
-                <p className="mt-2 text-sm text-ink-2">Choose which university students are eligible to join this club.</p>
-                <div role="group" aria-label="Club eligibility classification" className="mt-4 grid gap-3 sm:grid-cols-3">
-                  {([
-                    { value: 'GENERAL', label: 'University-wide', description: 'All university students' },
-                    { value: 'FACULTY_BASED', label: 'Faculty-based', description: 'Every major in one faculty' },
-                    { value: 'MAJOR_BASED', label: 'Major-based', description: 'Specific selected majors' },
-                  ] as const).map((option) => {
-                    const selected = classification === option.value
-                    return (
-                      <button key={option.value} type="button" aria-pressed={selected} onClick={() => { setClassification(option.value); setFacultyListOpen(false) }}
-                        className={`rounded-2xl border-2 p-3 text-left transition ${selected ? 'border-ink bg-paper text-ink' : 'border-ink/15 text-ink hover:border-ink/40'}`}>
-                        <span className="block text-sm font-semibold">{option.label}</span>
-                        <span className="mt-1 block text-xs text-ink-2">{option.description}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-                {classification === 'GENERAL' && <p className="mt-4 text-sm text-ink-2">Every student is eligible, so there is nothing else to choose.</p>}
-                {classification !== 'GENERAL' && universityDataLoading && <p className="mt-4 text-sm text-ink-2">Loading university faculties and majors...</p>}
-                {classification !== 'GENERAL' && universityDataError && <p role="alert" className="mt-4 rounded-xl bg-rose/10 p-4 text-sm text-rose">{universityDataError}</p>}
-
-                {classification === 'FACULTY_BASED' && !universityDataLoading && !universityDataError && (
-                  <div className="relative mt-4 max-w-sm">
-                    <p id="faculty-select-label" className="mb-2 text-sm font-semibold">Which faculty is it for?</p>
-                    <button type="button" aria-labelledby="faculty-select-label faculty-selected-value" aria-expanded={facultyListOpen} aria-controls="faculty-options" onClick={() => setFacultyListOpen((open) => !open)}
-                      className="flex w-full items-center justify-between gap-3 rounded-xl border border-line bg-paper px-4 py-3 text-left text-sm outline-none focus:border-plum focus:ring-2 focus:ring-plum/20">
-                      <span id="faculty-selected-value" className={selectedFaculty ? 'text-ink' : 'text-ink-2'}>{selectedFaculty?.name ?? 'Choose a faculty...'}</span>
-                      <ChevronDown size={18} aria-hidden="true" className={`shrink-0 transition ${facultyListOpen ? 'rotate-180' : ''}`} />
-                    </button>
-                    {facultyListOpen && (
-                      <div id="faculty-options" role="listbox" aria-labelledby="faculty-select-label" className="absolute z-10 mt-1 w-full overflow-hidden rounded-xl border border-ink/15 bg-paper shadow-xl">
-                        <div className="max-h-48 overflow-y-auto overscroll-contain p-1" style={{ scrollbarWidth: 'thin', scrollbarColor: '#8b7c96 transparent' }}>
-                          {faculties.map((faculty) => (
-                            <button key={faculty.id} type="button" role="option" aria-selected={facultyId === faculty.id} onClick={() => { setFacultyId(faculty.id); setFacultyListOpen(false) }}
-                              className={`flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm hover:bg-ink/5 ${facultyId === faculty.id ? 'bg-ink/10 font-semibold' : ''}`}>
-                              {faculty.name}{facultyId === faculty.id && <Check size={16} aria-hidden="true" />}
+              {classification === 'GENERAL' && <p className="mt-3 text-sm text-ink-2">Every student is eligible, so there is nothing else to choose.</p>}
+              {classification !== 'GENERAL' && universityDataError && <p role="alert" className="mt-3 text-sm text-rose">{universityDataError}</p>}
+              {classification !== 'GENERAL' && universityDataLoading && <p className="mt-3 text-sm text-ink-2">Loading university data…</p>}
+              {classification === 'FACULTY_BASED' && <label className="mt-3 block max-w-sm"><span className="mb-1.5 block text-sm font-semibold">Which faculty is it for?</span><select value={facultyId} onChange={(e) => setFacultyId(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3"><option value="">Choose a faculty…</option>{faculties.map((f) => <option value={f.id} key={f.id}>{f.name}</option>)}</select></label>}
+              {classification === 'MAJOR_BASED' && (
+                <div className="mt-3 rounded-2xl bg-paper p-4">
+                  <p className="mb-3 text-sm font-semibold">Which majors can join?</p>
+                  <div
+                    role="group"
+                    aria-label="Available faculties and majors"
+                    tabIndex={0}
+                    className="max-h-80 space-y-3 overflow-y-auto overscroll-contain pr-2"
+                    style={{ scrollbarWidth: 'thin' }}
+                  >
+                    {faculties.map((faculty) => (
+                      <div key={faculty.id}>
+                        <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-ink-2">
+                          {faculty.name}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {majors.filter((major) => major.facultyId === faculty.id).map((major) => (
+                            <button
+                              key={major.id}
+                              type="button"
+                              aria-pressed={selectedMajorIds.includes(major.id)}
+                              onClick={() => setSelectedMajorIds((prev) => prev.includes(major.id) ? prev.filter((id) => id !== major.id) : [...prev, major.id])}
+                              className={'rounded-full border px-3 py-1.5 text-sm font-semibold ' + (selectedMajorIds.includes(major.id) ? 'border-ink bg-ink text-paper' : 'border-ink/20 hover:border-ink')}
+                            >
+                              {major.name}
                             </button>
                           ))}
                         </div>
                       </div>
-                    )}
-                    {selectedFaculty && <p className="mt-3 text-xs text-ink-2">All majors in {selectedFaculty.name} will be eligible.</p>}
+                    ))}
                   </div>
-                )}
-
-                {classification === 'MAJOR_BASED' && !universityDataLoading && !universityDataError && (
-                  <div className="mt-4 rounded-2xl bg-paper p-4">
-                    <p className="text-sm font-semibold">Which majors can join?</p>
-                    <p className="mt-1 text-xs text-ink-2">Choose majors from any faculty.</p>
-                    <button type="button" onClick={openMajorPicker} className="mt-4 inline-flex items-center gap-2 rounded-full border border-ink/25 px-4 py-2 text-sm font-semibold hover:border-ink hover:bg-ink/5">
-                      {selectedMajorIds.length ? 'Edit selected majors' : 'Select majors'}
-                      <span className="rounded-full bg-ink px-2 py-0.5 text-xs text-paper">{selectedMajorIds.length}</span>
-                    </button>
-                    {selectedMajors.length > 0 && (
-                      <div className="mt-4 flex flex-wrap gap-2" aria-label="Selected majors">
-                        {selectedMajors.map((major) => (
-                          <span key={major.id} className="inline-flex items-center gap-2 rounded-full border border-ink/15 bg-card px-3 py-1.5 text-xs font-semibold">
-                            {major.name}
-                            <button type="button" aria-label={`Remove ${major.name}`} onClick={() => setSelectedMajorIds((ids) => ids.filter((id) => id !== major.id))} className="rounded-full hover:text-rose"><X size={13} /></button>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                </div>
+              )}
+              <p className="mb-2 mt-6 text-sm font-semibold">Board</p>
+              <div className="space-y-2">
+                <div className="hidden grid-cols-[1.2fr_1fr_1fr_2.5rem] gap-2 px-1 text-xs font-semibold uppercase tracking-wider text-ink-2 sm:grid"><span>Name</span><span>Role</span><span>Phone</span><span /></div>
+                {board.map((member, index) => <div key={index} className="grid gap-2 sm:grid-cols-[1.2fr_1fr_1fr_2.5rem]"><input aria-label="Board member name" placeholder="Full name" value={member.name} onChange={(e) => setBoard((items) => items.map((m, i) => i === index ? { ...m, name: e.target.value } : m))} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /><input aria-label="Role" placeholder="Role, e.g. President" value={member.role} onChange={(e) => setBoard((items) => items.map((m, i) => i === index ? { ...m, role: e.target.value } : m))} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /><input aria-label="Phone number" placeholder="+1 555 0100" value={member.phone} onChange={(e) => setBoard((items) => items.map((m, i) => i === index ? { ...m, phone: e.target.value } : m))} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /><button type="button" aria-label="Remove member" onClick={() => setBoard((items) => items.filter((_, i) => i !== index))} className="grid size-11 place-items-center rounded-full text-ink-2 hover:bg-ink/10"><Trash2 size={16} /></button></div>)}
               </div>
-              {formError && <p role="alert" className="rounded-xl bg-rose/10 p-4 text-sm text-rose">{formError}</p>}
-              <div className="flex justify-end gap-3 pt-3">
-                <button type="button" onClick={() => setShowAddClub(false)} className="rounded-full border border-ink/20 px-6 py-3 text-sm font-semibold hover:bg-ink/5">Cancel</button>
-                <button type="submit" disabled={saving} className="rounded-full bg-ink px-6 py-3 text-sm font-semibold text-paper hover:bg-plum-2 disabled:cursor-wait disabled:opacity-50">{saving ? 'Saving...' : editingClubId ? 'Save changes' : 'Create club'}</button>
-              </div>
+              <button type="button" onClick={() => setBoard((items) => [...items, { name: '', role: '', phone: '' }])} className="mt-3 inline-flex items-center gap-2 rounded-full border border-ink/25 px-3.5 py-1.5 text-sm font-semibold hover:bg-ink hover:text-paper"><Plus size={15} />Add board member</button>
+              <div className="mt-5 border-t border-ink/10 pt-4"><p className="text-sm font-semibold">Who holds the shared club account?</p><p className="mb-3 text-xs text-ink-2">Exactly two people from the board. Fill in the board above first.</p><div className="grid gap-4 sm:grid-cols-2">{[0, 1].map((slot) => <label key={slot} className="block"><span className="mb-1.5 block text-sm font-semibold">Shared account holder {slot + 1}</span><select disabled={board.filter((m) => m.name.trim()).length < 2} value={boardAdmins[slot]} onChange={(e) => setBoardAdmins((v) => v.map((x, i) => i === slot ? e.target.value : x))} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3"><option value="">Choose from the board…</option>{board.filter((m) => m.name.trim() && m.name !== boardAdmins[1 - slot]).map((m) => <option key={m.name} value={m.name}>{m.name} · {m.role}</option>)}</select></label>)}</div></div>
+              <div className="mt-4 max-w-sm"><label className="block"><span className="mb-1.5 block text-sm font-semibold">Shared admin email</span><input type="email" required value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="name@clubs.uni.edu" className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><p className="mt-1 text-xs text-ink-2">Used as the club contact email. Individual student administrator accounts are assigned on the club page.</p></div>
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">{[['First-time fee ($)', firstFee, setFirstFee], ['Renewal fee ($)', renewalFee, setRenewalFee]].map(([label, val, setter]) => <label key={label as string} className="block"><span className="mb-1.5 block text-sm font-semibold">{label as string}</span><input type="number" min="0" value={val as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label>)}</div>
+              <p className="mb-2 mt-6 text-sm font-semibold">Membership registration window <span className="font-normal text-ink-2">(optional)</span></p>
+              <div className="inline-flex rounded-full border border-ink/15 p-0.5 text-sm font-semibold"><button type="button" aria-pressed={!windowEnabled} onClick={() => setWindowEnabled(false)} className={'rounded-full px-4 py-1.5 ' + (!windowEnabled ? 'bg-ink text-paper' : 'text-ink-2')}>Any time</button><button type="button" aria-pressed={windowEnabled} onClick={() => setWindowEnabled(true)} className={'rounded-full px-4 py-1.5 ' + (windowEnabled ? 'bg-ink text-paper' : 'text-ink-2')}>Set a window</button></div>
+              {windowEnabled && <div className="mt-3 grid max-w-md gap-4 sm:grid-cols-2"><label className="text-sm font-semibold">Opens<input type="date" value={windowStart} onChange={(e) => setWindowStart(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><label className="text-sm font-semibold">Closes<input type="date" value={windowEnd} onChange={(e) => setWindowEnd(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div>}
+              <details className="mt-5 rounded-xl border border-ink/10 px-4 py-3"><summary className="cursor-pointer text-sm font-semibold">Additional club information required by ClubHub</summary><label className="mt-3 block"><span className="mb-1.5 block text-sm font-semibold">Description</span><textarea required rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="text-sm font-semibold">Logo URL<input type="url" value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><label className="text-sm font-semibold">Founded year<input type="number" min="1800" max="2100" value={foundedYear} onChange={(e) => setFoundedYear(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div></details>
+              <ClubLabelsPicker value={clubLabels} onChange={setClubLabels} disabled={saving} />
+              {formError && <p role="alert" className="mt-4 rounded-xl bg-rose-soft px-4 py-3 text-sm font-medium text-[#8a1f47]">{formError}</p>}
+              <button type="submit" disabled={saving} className="mt-6 inline-flex items-center justify-center rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:opacity-40">{saving ? 'Saving...' : 'Create club'}</button>
+              <p className="mt-2 text-xs text-ink-2">Board, fees and registration-window entries are visual previews until their backend sprints are implemented; only supported club information, eligibility, supervisor and labels are saved.</p>
             </form>
           </div>
-        </div>
-      , document.body)}
+        </div>, document.body
+      )}
 
-      {showAddClub && majorPickerOpen && createPortal(
-        <div className="fixed inset-y-0 right-0 left-0 z-[60] flex items-center justify-center overflow-hidden bg-ink/70 p-3 sm:p-5 lg:left-[17rem]">
-          <div role="dialog" aria-modal="true" aria-labelledby="choose-majors-title" className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-3xl bg-paper shadow-2xl sm:max-h-[calc(100dvh-2.5rem)]">
-            <div className="shrink-0 border-b border-ink/10 p-5 sm:p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 id="choose-majors-title" className="font-display text-3xl">Select eligible majors</h3>
-                  <p className="mt-1 text-sm text-ink-2">Select multiple majors across faculties.</p>
-                </div>
-                <button type="button" aria-label="Cancel major selection" onClick={() => setMajorPickerOpen(false)} className="rounded-full p-2 hover:bg-ink/5"><X size={20} /></button>
-              </div>
-              <input type="search" value={majorSearch} onChange={(event) => setMajorSearch(event.target.value)} placeholder="Search majors or faculties" aria-label="Search majors or faculties" className="mt-4 w-full rounded-xl border border-line bg-card px-4 py-3 text-sm outline-none focus:border-plum" />
-              <p className="mt-3 text-xs font-semibold text-rose">{draftMajorIds.length} major{draftMajorIds.length === 1 ? '' : 's'} selected</p>
-            </div>
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain p-5 sm:p-6" style={{ scrollbarWidth: 'thin', scrollbarColor: '#8b7c96 transparent' }}>
-              {faculties.map((faculty) => {
-                const query = majorSearch.trim().toLowerCase()
-                const facultyMajors = majors.filter((major) => major.facultyId === faculty.id && (!query || faculty.name.toLowerCase().includes(query) || major.name.toLowerCase().includes(query)))
-                if (!facultyMajors.length) return null
-                return (
-                  <div key={faculty.id}>
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-2">{faculty.name}</p>
-                    <div className="flex flex-wrap gap-2">
-                      {facultyMajors.map((major) => {
-                        const selected = draftMajorIds.includes(major.id)
-                        return (
-                          <button key={major.id} type="button" aria-pressed={selected}
-                            onClick={() => setDraftMajorIds((ids) => selected ? ids.filter((id) => id !== major.id) : [...ids, major.id])}
-                            className={`rounded-full border px-3 py-1.5 text-sm font-semibold transition ${selected ? 'border-ink bg-ink text-paper' : 'border-ink/20 bg-card text-ink hover:border-ink'}`}>
-                            {major.name}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })}
-              {majors.every((major) => {
-                const facultyName = faculties.find((faculty) => faculty.id === major.facultyId)?.name ?? ''
-                const query = majorSearch.trim().toLowerCase()
-                return !!query && !major.name.toLowerCase().includes(query) && !facultyName.toLowerCase().includes(query)
-              }) && <p className="text-sm text-ink-2">No matching majors found.</p>}
-            </div>
-            <div className="flex shrink-0 justify-end gap-3 border-t border-ink/10 bg-paper p-5 sm:p-6">
-              <button type="button" onClick={() => setMajorPickerOpen(false)} className="rounded-full border border-ink/20 px-5 py-2.5 text-sm font-semibold hover:bg-ink/5">Cancel</button>
-              <button type="button" onClick={() => { setSelectedMajorIds(draftMajorIds); setMajorPickerOpen(false) }} className="rounded-full bg-ink px-6 py-2.5 text-sm font-semibold text-paper hover:bg-plum-2">Apply ({draftMajorIds.length})</button>
-            </div>
-          </div>
-        </div>
-      , document.body)}
     </section>
   )
 }

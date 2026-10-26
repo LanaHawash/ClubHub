@@ -16,7 +16,8 @@ import { UpdateClubDto } from './dto/update-club.dto';
 import { ClubsService } from './clubs.service';
 import { CreateClubDto } from './dto/create-club.dto';
 import { AssignSupervisorDto } from './dto/assign-supervisor.dto';
-import { CreateClubAdminAccountDto } from './dto/create-club-admin-account.dto';
+import { AssignClubAdminDto } from './dto/assign-club-admin.dto';
+import { ClubAdminAssignmentsService } from './club-admin-assignments.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -25,9 +26,10 @@ import { AccountRole } from '../../generated/prisma/client';
 
 @Controller('clubs')
 export class ClubsController {
-  constructor(
-    private readonly clubsService: ClubsService,
-  ) {}
+constructor(
+  private readonly clubsService: ClubsService,
+  private readonly clubAdminAssignmentsService: ClubAdminAssignmentsService,
+) {}
 
   // Public: list active clubs
  // Public: list active clubs with pagination
@@ -69,14 +71,45 @@ findOneForDeanship(
 }
 
 
-// Sprint 3.5: Club administrators can retrieve their own club.
-@Get('my-club')
+
+// Sprint 3.5 redesign:
+// Return clubs the authenticated student currently administers.
+@Get('my-admin-assignments')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.CLUB)
-findMyClub(@Req() request: AuthenticatedRequest) {
-  return this.clubsService.findMyClub(request.user.id);
+@Roles(AccountRole.STUDENT)
+getMyAdminAssignments(
+  @Req() request: AuthenticatedRequest,
+) {
+  return this.clubAdminAssignmentsService.getMyAdminAssignments(
+    request.user.id,
+  );
 }
 
+// Sprint 3.5 redesign:
+// Return the administration workspace for an assigned student.
+@Get(':id/admin/overview')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.STUDENT)
+getClubAdminOverview(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Req() request: AuthenticatedRequest,
+) {
+  return this.clubAdminAssignmentsService.getClubAdminOverview(
+    clubId,
+    request.user.id,
+  );
+}
+// Sprint 3.5: Deanship views current club administrators.
+@Get(':id/admin-assignments')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+getClubAdminAssignments(
+  @Param('id', ParseUUIDPipe) clubId: string,
+) {
+  return this.clubAdminAssignmentsService.getClubAdminAssignments(
+    clubId,
+  );
+}
   // Public: view an active club
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
@@ -128,15 +161,37 @@ assignSupervisor(
     dto.supervisorId,
   );
 }
-// Sprint 3.5: Create a shared club admin account (Deanship only).
-@Post(':id/admin-account')
+// Sprint 3.5 redesign:
+// Deanship assigns a student administrator to a club.
+@Post(':id/admin-assignments')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(AccountRole.DEANSHIP)
-createAdminAccount(
-  @Param('id', ParseUUIDPipe) id: string,
-  @Body() dto: CreateClubAdminAccountDto,
+assignClubAdmin(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Body() dto: AssignClubAdminDto,
+  @Req() request: AuthenticatedRequest,
 ) {
-  return this.clubsService.createAdminAccount(id, dto);
+  return this.clubAdminAssignmentsService.assignAdmin(
+    clubId,
+    dto,
+    request.user.id,
+  );
+}
+// Sprint 3.5 redesign:
+// Deanship revokes a student's club administration access.
+@Patch(':id/admin-assignments/:assignmentId/revoke')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+revokeClubAdmin(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Param('assignmentId', ParseUUIDPipe) assignmentId: string,
+  @Req() request: AuthenticatedRequest,
+) {
+  return this.clubAdminAssignmentsService.revokeAdmin(
+    clubId,
+    assignmentId,
+    request.user.id,
+  );
 }
 
 }

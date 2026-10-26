@@ -20,6 +20,9 @@ export type Club = {
   description: string
   scope: ClubScope
   imageUrl?: string
+  labels: string[]
+  eligibleMajors: string[]
+  facultyName: string | null
 }
 
 type ApiClub = {
@@ -29,6 +32,25 @@ type ApiClub = {
   classification: 'GENERAL' | 'FACULTY_BASED' | 'MAJOR_BASED'
   status: 'ACTIVE' | 'ARCHIVED'
   logoUrl: string | null
+
+  faculty: {
+    id: string
+    name: string
+  } | null
+
+  eligibleMajors: {
+    major: {
+      id: string
+      name: string
+    }
+  }[]
+
+  labels: {
+    label: {
+      id: string
+      name: string
+    }
+  }[]
 }
 
 type PaginatedClubsResponse = {
@@ -94,17 +116,30 @@ for (let page = 2; page <= result.meta.totalPages; page++) {
     // Convert API records to the format used by our React components.
     const active = allClubs
       .filter((club) => club.status === 'ACTIVE')
-      .map((club): Club => ({
-        id: club.id,
-        name: club.name,
-        description: club.description,
-        scope: club.classification === 'MAJOR_BASED'
-          ? 'major'
-          : club.classification === 'FACULTY_BASED'
-            ? 'faculty'
-            : 'general',
-        imageUrl: club.logoUrl || undefined,
-      }))
+.map((club): Club => ({
+  id: club.id,
+  name: club.name,
+  description: club.description,
+
+  scope:
+    club.classification === 'MAJOR_BASED'
+      ? 'major'
+      : club.classification === 'FACULTY_BASED'
+        ? 'faculty'
+        : 'general',
+
+  imageUrl: club.logoUrl || undefined,
+
+  labels: (club.labels ?? []).map(
+    (item) => item.label.name
+  ),
+
+  eligibleMajors: (club.eligibleMajors ?? []).map(
+    (item) => item.major.name
+  ),
+
+  facultyName: club.faculty?.name ?? null,
+}))
         if (!controller.signal.aborted) {
           setClubs(active)
           setError(null)

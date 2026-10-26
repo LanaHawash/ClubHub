@@ -12,12 +12,105 @@ import {
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { CreateClubDto } from './dto/create-club.dto';
 import { UpdateClubDto } from './dto/update-club.dto';
-import { hash } from 'bcrypt';
-import { CreateClubAdminAccountDto } from './dto/create-club-admin-account.dto';
+
 @Injectable()
 export class ClubsService {
   constructor(private readonly prisma: PrismaService) {}
+  private async validateSupervisor(
+  supervisorId?: string | null,
+): Promise<void> {
+  if (!supervisorId) return;
 
+  const supervisor = await this.prisma.supervisorProfile.findUnique({
+    where: { id: supervisorId },
+    include: {
+      account: {
+        select: {
+          role: true,
+          status: true,
+        },
+      },
+    },
+  });
+
+  if (
+    !supervisor ||
+    supervisor.account.role !== AccountRole.SUPERVISOR ||
+    supervisor.account.status !== AccountStatus.ACTIVE
+  ) {
+    throw new BadRequestException(
+      'Only active supervisors can be assigned to clubs.',
+    );
+  }
+}
+private async resolveClubLabelIds(
+  tx: Prisma.TransactionClient,
+  labelIds: string[] = [],
+  newLabels: string[] = [],
+): Promise<string[]> {
+  const resolvedIds = new Set(labelIds);
+
+  // Verify that every selected existing label exists.
+  if (resolvedIds.size > 0) {
+    const existing = await tx.label.findMany({
+      where: {
+        id: { in: [...resolvedIds] },
+      },
+      select: { id: true },
+    });
+
+    if (existing.length !== resolvedIds.size) {
+      throw new BadRequestException(
+        'One or more selected labels do not exist.',
+      );
+    }
+  }
+
+  // Normalize new names, including repeated spaces.
+  const normalizedNames = [
+    ...new Map(
+      newLabels.map((name) => {
+        const normalized = name.trim().replace(/\s+/g, ' ');
+
+        return [normalized.toLowerCase(), normalized] as const;
+      }),
+    ).values(),
+  ];
+
+  for (const name of normalizedNames) {
+    if (name.length < 2 || name.length > 80) {
+      throw new BadRequestException(
+        'Label names must contain 2 to 80 characters.',
+      );
+    }
+
+    // Reuse an existing label if the name already exists.
+    const existingLabel = await tx.label.findFirst({
+      where: {
+        name: {
+          equals: name,
+          mode: 'insensitive',
+        },
+      },
+      select: { id: true },
+    });
+
+    if (existingLabel) {
+      resolvedIds.add(existingLabel.id);
+      continue;
+    }
+
+    // Create new labels only inside the club transaction.
+    const createdLabel = await tx.label.create({
+      data: { name },
+      select: { id: true },
+    });
+
+    resolvedIds.add(createdLabel.id);
+  }
+
+  return [...resolvedIds];
+}
   // Retrieve all active clubs.
  // Retrieve active clubs with pagination.
 async findAll(pageParam?: string, limitParam?: string) {
@@ -329,9 +422,18 @@ async findOneForDeanship(id: string) {
       );
     }
   }
+await this.validateSupervisor(dto.supervisorId);
+try {
+  return await this.prisma.$transaction(async (tx) => {
+    // Resolve existing and newly entered labels.
+    const selectedLabelIds = await this.resolveClubLabelIds(
+      tx,
+      dto.labelIds ?? [],
+      dto.newLabels ?? [],
+    );
 
-  try {
-    return await this.prisma.club.create({
+    // Create the club and its relationships together.
+    return tx.club.create({
       data: {
         name,
         description,
@@ -340,6 +442,7 @@ async findOneForDeanship(id: string) {
         facultyId: dto.facultyId ?? null,
         logoUrl: dto.logoUrl ?? null,
         foundedYear: dto.foundedYear ?? null,
+        supervisorId: dto.supervisorId ?? null,
         meetingInfo: dto.meetingInfo ?? null,
 
         eligibleMajors:
@@ -352,28 +455,48 @@ async findOneForDeanship(id: string) {
                 })),
               }
             : undefined,
+
+        labels:
+          selectedLabelIds.length > 0
+            ? {
+                create: selectedLabelIds.map((labelId) => ({
+                  label: {
+                    connect: { id: labelId },
+                  },
+                })),
+              }
+            : undefined,
       },
+
       include: {
         faculty: true,
+
         eligibleMajors: {
           include: {
             major: true,
           },
         },
+
+        labels: {
+          include: {
+            label: true,
+          },
+        },
       },
     });
-  } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2002'
-    ) {
-      throw new ConflictException(
-        'A club with this name already exists.',
-      );
-    }
-
-    throw error;
+  });
+} catch (error) {
+  if (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2002'
+  ) {
+    throw new ConflictException(
+      'A club or label with this name already exists.',
+    );
   }
+
+  throw error;
+}
 }
 async update(id: string, dto: UpdateClubDto) {
   const existing = await this.prisma.club.findUnique({
@@ -453,6 +576,9 @@ async update(id: string, dto: UpdateClubDto) {
       );
     }
   }
+  if (dto.supervisorId !== undefined) {
+  await this.validateSupervisor(dto.supervisorId);
+}
 
   try {
     return await this.prisma.$transaction(async (tx) => {
@@ -484,6 +610,9 @@ async update(id: string, dto: UpdateClubDto) {
           ...(dto.meetingInfo !== undefined && {
             meetingInfo: dto.meetingInfo,
           }),
+          ...(dto.supervisorId !== undefined && {
+            supervisorId: dto.supervisorId,
+          }),
         },
       });
 
@@ -502,18 +631,59 @@ async update(id: string, dto: UpdateClubDto) {
           });
         }
       }
+       // Sprint 3.6: Update labels only when explicitly requested.
+if (
+  dto.labelIds !== undefined ||
+  dto.newLabels !== undefined
+) {
+  // If only new labels were supplied, preserve existing selections.
+  const existingLabelIds =
+    dto.labelIds ??
+    (
+      await tx.clubLabel.findMany({
+        where: { clubId: id },
+        select: { labelId: true },
+      })
+    ).map((item) => item.labelId);
 
-      return tx.club.findUniqueOrThrow({
-        where: { id },
-        include: {
-          faculty: true,
-          eligibleMajors: {
-            include: {
-              major: true,
-            },
-          },
-        },
-      });
+  const selectedLabelIds = await this.resolveClubLabelIds(
+    tx,
+    existingLabelIds,
+    dto.newLabels ?? [],
+  );
+
+  // Replace this club's associations, not the global labels.
+  await tx.clubLabel.deleteMany({
+    where: { clubId: id },
+  });
+
+  if (selectedLabelIds.length > 0) {
+    await tx.clubLabel.createMany({
+      data: selectedLabelIds.map((labelId) => ({
+        clubId: id,
+        labelId,
+      })),
+    });
+  }
+}
+    return tx.club.findUniqueOrThrow({
+  where: { id },
+  include: {
+    faculty: true,
+
+    eligibleMajors: {
+      include: {
+        major: true,
+      },
+    },
+
+    labels: {
+      include: {
+        label: true,
+      },
+    },
+  },
+});
     });
   } catch (error) {
     if (
@@ -652,146 +822,7 @@ async assignSupervisor(
   });
 }
 
-// Sprint 3.5: Create one shared admin account per club.
-async createAdminAccount(
-  clubId: string,
-  dto: CreateClubAdminAccountDto,
-) {
-  const email = dto.email.trim().toLowerCase();
 
-  const club = await this.prisma.club.findUnique({
-    where: { id: clubId },
-    select: {
-      id: true,
-      adminAccountId: true,
-    },
-  });
 
-  if (!club) {
-    throw new NotFoundException('Club not found.');
-  }
 
-  if (club.adminAccountId) {
-    throw new ConflictException(
-      'This club already has a shared admin account.',
-    );
-  }
-
-  // Never store the original password.
-  const passwordHash = await hash(dto.password, 12);
-
-  try {
-    return await this.prisma.$transaction(async (tx) => {
-      // Atomically claim the club before creating an account.
-      // Only one concurrent request can claim an unassigned club.
-      const claim = await tx.club.updateMany({
-        where: {
-          id: clubId,
-          adminAccountId: null,
-        },
-        data: {
-          // The account does not exist yet, so we cannot
-          // link it at this point.
-          updatedAt: new Date(),
-        },
-      });
-
-      if (claim.count !== 1) {
-        throw new ConflictException(
-          'This club already has a shared admin account.',
-        );
-      }
-
-      const account = await tx.account.create({
-        data: {
-          email,
-          passwordHash,
-          role: AccountRole.CLUB,
-          status: AccountStatus.ACTIVE,
-        },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          status: true,
-          createdAt: true,
-        },
-      });
-
-      await tx.club.update({
-        where: { id: clubId },
-        data: {
-          adminAccountId: account.id,
-        },
-      });
-
-      return {
-        message: 'Shared club admin account created successfully.',
-        clubId,
-        account,
-      };
-    });
-  } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2002'
-    ) {
-      throw new ConflictException(
-        'This email is already in use or the club already has an admin account.',
-      );
-    }
-
-    throw error;
-  }
-}
-
-// Sprint 3.5: Retrieve the authenticated club admin's own club.
-async findMyClub(accountId: string) {
-  const club = await this.prisma.club.findFirst({
-    where: {
-      adminAccountId: accountId,
-    },
-    select: {
-      id: true,
-      name: true,
-      description: true,
-      classification: true,
-      status: true,
-      contactEmail: true,
-      logoUrl: true,
-      foundedYear: true,
-      meetingInfo: true,
-      faculty: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
-      supervisor: {
-        select: {
-          id: true,
-          fullName: true,
-        },
-      },
-      eligibleMajors: {
-        select: {
-          major: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
-      },
-    },
-  });
-
-  if (!club) {
-    throw new NotFoundException(
-      'No club is linked to this account.',
-    );
-  }
-
-  return club;
-}
 }

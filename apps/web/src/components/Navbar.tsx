@@ -2,8 +2,7 @@ import { useState } from 'react'
 import { Bell, LogOut, Menu, UserRound, X } from 'lucide-react'
 
 type PublicPage = 'home' | 'clubs' | 'events'
-type Page = PublicPage | 'dashboard' | 'profile'
-
+type Page = PublicPage | 'dashboard' | 'profile' | 'club-admin'
 type NavbarProps = {
   page: Page
   onHome: () => void
@@ -15,6 +14,8 @@ type NavbarProps = {
   signedInEmail?: string
   accountRole?: string
   onProfile: () => void
+  hasClubAdminAccess?: boolean
+  onManageClub?: () => void
 }
 
 export default function Navbar({
@@ -28,6 +29,8 @@ export default function Navbar({
   signedInEmail,
   accountRole,
   onProfile,
+  hasClubAdminAccess = false,
+  onManageClub,
 }: NavbarProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const authenticated = Boolean(signedInEmail)
@@ -46,6 +49,18 @@ export default function Navbar({
     }]
   : []),
   ]
+  if (
+  authenticated &&
+  accountRole === 'STUDENT' &&
+  hasClubAdminAccess &&
+  onManageClub
+) {
+  links.push({
+    id: 'club-admin',
+    label: 'Manage Club',
+    action: onManageClub,
+  })
+}
   function navigate(action: () => void) {
     setMenuOpen(false)
     action()

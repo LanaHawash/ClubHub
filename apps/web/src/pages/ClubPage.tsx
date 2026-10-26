@@ -21,6 +21,14 @@ type ApiClub = {
   contactEmail?: string | null
   meetingInfo?: string | null
   status: string
+  labels: {
+  id: string
+  labelId: string
+  label: {
+    id: string
+    name: string
+  }
+}[]
 }
 
 type ClubPageProps = {
@@ -143,13 +151,23 @@ export default function ClubPage({
             All clubs
           </button>
 
-          <div className="flex flex-wrap gap-2">
+{/* Figma: Club classification and labels */}
+<div className="flex flex-wrap items-center gap-2">
 
-            <span className="rounded-full bg-white/70 px-4 py-2 text-xs font-semibold">
-              {club.classification.replaceAll('_', ' ')}
-            </span>
+  <span className="rounded-full bg-white/70 px-4 py-2 text-xs font-semibold">
+    {club.classification.replaceAll('_', ' ')}
+  </span>
 
-          </div>
+  {club.labels.map(({ label }) => (
+    <span
+      key={label.id}
+      className="rounded-full border border-current/30 px-4 py-2 text-xs font-semibold"
+    >
+      #{label.name}
+    </span>
+  ))}
+
+</div>
 
           <h1 className="anim-rise mt-5 max-w-4xl font-display text-6xl leading-[0.92] sm:text-8xl">
             {club.name}

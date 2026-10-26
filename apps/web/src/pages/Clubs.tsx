@@ -21,14 +21,38 @@ export default function Clubs({ onClubClick }: ClubsProps) {
   const { clubs, loading, error } = useClubs()
   
 
-  const query = search.trim().toLowerCase()
-  const filteredClubs = clubs.filter((club) => {
-    const matchesCategory = category === 'all' || club.scope === category
-    const matchesSearch = !query ||
-      club.name.toLowerCase().includes(query) ||
-      club.description.toLowerCase().includes(query)
-    return matchesCategory && matchesSearch
-  })
+const query = search.trim().toLowerCase()
+
+const filteredClubs = clubs.filter((club) => {
+  const matchesCategory =
+    category === 'all' || club.scope === category
+
+  if (!matchesCategory) return false
+  if (!query) return true
+
+  const matchesClubName =
+    club.name.toLowerCase().includes(query)
+
+  // Labels should match exactly, ignoring capitalization.
+  const matchesLabel = club.labels.some(
+    (label) => label.trim().toLowerCase() === query
+  )
+
+  // Allow searching majors and faculties by their names.
+  const matchesMajor = club.eligibleMajors.some(
+    (major) => major.toLowerCase().includes(query)
+  )
+
+  const matchesFaculty =
+    club.facultyName?.toLowerCase().includes(query) ?? false
+
+  return (
+    matchesClubName ||
+    matchesLabel ||
+    matchesMajor ||
+    matchesFaculty
+  )
+})
       const totalPages = Math.ceil(
       filteredClubs.length / CLUBS_PER_PAGE
     )

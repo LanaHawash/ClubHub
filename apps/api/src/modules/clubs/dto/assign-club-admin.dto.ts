@@ -3,7 +3,7 @@ import { ClubAdminPosition } from '../../../generated/prisma/client';
 
 export class AssignClubAdminDto {
   @IsUUID()
-  accountId!: string;
+  boardAppointmentId!: string;
 
   @IsEnum(ClubAdminPosition)
   position!: ClubAdminPosition;

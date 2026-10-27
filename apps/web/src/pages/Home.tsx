@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowRight, Clock, MapPin, ChevronLeft,ChevronRight,Megaphone, } from 'lucide-react'
 import featuredEvent from '../assets/hack.jpg'
 import featuredEvent1 from '../assets/club.webp'
-import ClubCard, { scopeLabel, useClubs } from '../components/ClubCard'
+import ClubCard, { scopeLabel, useClubs, useClubEligibility } from '../components/ClubCard'
 import EventCard from '../components/EventCard'
 import EventFeed from '../components/EventFeed'
 import EventModal from '../components/EventModal'
@@ -45,6 +45,7 @@ type HomeProps = {
   onEvents: () => void
   onClubClick: (clubId: string) => void
   isSignedIn: boolean
+  accessToken?: string | null
 }
 const featuredEvents = [
   {
@@ -78,8 +79,10 @@ export default function Home({
   onEvents,
   onClubClick,
   isSignedIn,
+  accessToken = null,
 }: HomeProps) {
   const { clubs, loading: clubsLoading, error: clubsError } = useClubs()
+  const clubBadges = useClubEligibility(clubs, accessToken)
   const [upcomingEvents, setUpcomingEvents] = useState<EventFeedData[]>([])
 const [selectedEvent, setSelectedEvent] = useState<EventFeedData | null>(null)
 const [eventsLoading, setEventsLoading] = useState(true)
@@ -145,7 +148,7 @@ useEffect(() => {
   return () => controller.abort()
 }, [])
   const [activeIndex, setActiveIndex] = useState(0)
-  const [selectedCategory, setSelectedCategory] = useState<
+  const [selectedCategory, setSelectedCategory] =useState<
     'major' | 'faculty' | 'general'
   >('major')
     const [isPlaying, setIsPlaying] = useState(true)
@@ -199,7 +202,7 @@ useEffect(() => {
             aria-hidden="true"
             className="size-2 rounded-full bg-butter"
           />
-         Featured · {activeIndex + 1}/{featuredEvents.length}
+         Featured آ· {activeIndex + 1}/{featuredEvents.length}
         </p>
 
         <h1 className="font-display text-6xl leading-tight sm:text-7xl">
@@ -207,12 +210,12 @@ useEffect(() => {
         </h1>
 
         <p className="mt-6 max-w-lg text-lg text-white/75">
-            {featuredEventData.description}        </p>
+            {featuredEventData.description} </p>
 
         <div className="mt-6 flex flex-wrap gap-x-5 gap-y-3 text-sm text-white/80">
           <span className="inline-flex items-center gap-2">
             <Clock size={16} aria-hidden="true" className="text-rose" />
-            {featuredEventData.dateLabel} · {featuredEventData.time}
+            {featuredEventData.dateLabel} آ· {featuredEventData.time}
           </span>
 
           <span className="inline-flex items-center gap-2">
@@ -224,7 +227,7 @@ useEffect(() => {
         <button
           type="button"
           onClick={onSignIn}
-          className="mt-9 inline-flex items-center gap-2 rounded-full border border-white/30 px-6 py-3 font-semibold transition-colors hover:bg-white hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-butter"
+          className="mt-9 inline-flex items-center gap-2 rounded-full border border-white/30 px-6 py-3 font-semibold transition-colors hover:bg-whitehover:text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-butter"
         >
           Student sign-in
           <ArrowRight size={18} aria-hidden="true" />
@@ -354,7 +357,7 @@ useEffect(() => {
   id="clubs"
   className="relative overflow-hidden bg-paper pt-10 pb-16 md:pt-14"
 >
-  <div className="relative z-10 mx-auto max-w-7xl px-5 sm:px-8">
+  <div className="relative z-10 mx-auto max-w-7xlpx-5 sm:px-8">
 
     <p className="mb-4 font-mono text-xs uppercase tracking-[0.2em] text-rose">
       Find your club
@@ -381,7 +384,7 @@ useEffect(() => {
             id: 'faculty',
             number: '02',
             title: 'By faculty',
-            description: 'Communities for a whole faculty.',
+            description: 'Communities for a wholefaculty.',
           },
           {
             id: 'general',
@@ -435,6 +438,7 @@ useEffect(() => {
               <ClubCard
                 key={club.id}
                 club={{ ...club, scope: scopeLabel(club.scope) }}
+                badgeStatus={accessToken ? clubBadges[club.id] : null}
                 onClick={() => onClubClick(club.id)}
               />
             ))}
@@ -450,7 +454,7 @@ useEffect(() => {
   </section>
 
   {/* Upcoming Events */}
-  {/* Events feed — Figma layout */}
+  {/* Events feed â€” Figma layout */}
   <section id="events" className="bg-card">
     <div className="mx-auto max-w-7xl px-5 sm:px-8">
 
@@ -498,7 +502,7 @@ useEffect(() => {
 
     </div>
   </section>
-  {/* Event feed — structure from Figma Home.tsx */}
+  {/* Event feed â€” structure from Figma Home.tsx */}
 <section className="bg-card pb-16 pt-6">
   <div className="mx-auto max-w-7xl px-5 sm:px-8">
 

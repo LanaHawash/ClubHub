@@ -9,7 +9,6 @@ import {
   AccountRole,
   AccountStatus,
   ClubAdminPosition,
-  Prisma,
 } from '../../generated/prisma/client';
 
 import { ClubAdminAssignmentsService } from './club-admin-assignments.service';
@@ -18,191 +17,201 @@ describe('ClubAdminAssignmentsService', () => {
   const clubId = '11111111-1111-4111-8111-111111111111';
   const studentAccountId = '22222222-2222-4222-8222-222222222222';
   const deanshipAccountId = '33333333-3333-4333-8333-333333333333';
+  const universityStudentId = '44444444-4444-4444-8444-444444444444';
   const assignmentId = '55555555-5555-4555-8555-555555555555';
+  const boardAppointmentId = '88888888-8888-4888-8888-888888888888';
+
   const prisma = {
-    club: {
-      findUnique: jest.fn(),
+    club: { findUnique: jest.fn() },
+    account: { findUnique: jest.fn() },
+    boardAppointment: { findUnique: jest.fn() },
+    clubAdminAssignment: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      updateMany: jest.fn(),
     },
-    account: {
-      findUnique: jest.fn(),
-    },
-clubAdminAssignment: {
-  create: jest.fn(),
-  findFirst: jest.fn(),
-  findMany: jest.fn(),
-  updateMany: jest.fn(),
-},
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(),
   };
 
   let service: ClubAdminAssignmentsService;
-
   const dto = {
-    accountId: studentAccountId,
+    boardAppointmentId,
     position: ClubAdminPosition.PRESIDENT,
   };
 
-  beforeEach(() => {
-    jest.clearAllMocks();
+  const currentAppointment = () => ({
+    id: boardAppointmentId,
+    clubId,
+    startDate: new Date('2025-01-01T00:00:00.000Z'),
+    endDate: null,
+    student: {
+      account: {
+        id: studentAccountId,
+        role: AccountRole.STUDENT as AccountRole,
+        status: AccountStatus.ACTIVE as AccountStatus,
+      },
+    },
+  });
 
+  beforeEach(() => {
+    jest.resetAllMocks();
     service = new ClubAdminAssignmentsService(prisma as any);
 
-    prisma.club.findUnique.mockResolvedValue({
-      id: clubId,
-    });
+    // Real code uses an interactive transaction, so the mock provides
+    // the same client methods to the transaction callback.
+    prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma));
+    prisma.$queryRaw.mockResolvedValue([]);
+    prisma.club.findUnique.mockResolvedValue({ id: clubId, status: 'ACTIVE' });
+    prisma.boardAppointment.findUnique.mockImplementation(async () => currentAppointment());
+    prisma.clubAdminAssignment.findMany.mockResolvedValue([]);
 
     prisma.account.findUnique.mockImplementation(
-      ({ where }: { where: { id: string } }) => {
+      async ({ where }: { where: { id: string } }) => {
         if (where.id === studentAccountId) {
-          return Promise.resolve({
+          return {
             id: studentAccountId,
             role: AccountRole.STUDENT,
             status: AccountStatus.ACTIVE,
-            universityStudentId: '44444444-4444-4444-8444-444444444444',
-          });
+            universityStudentId,
+          };
         }
-
         if (where.id === deanshipAccountId) {
-          return Promise.resolve({
-            role: AccountRole.DEANSHIP,
-            status: AccountStatus.ACTIVE,
-          });
+          return { role: AccountRole.DEANSHIP, status: AccountStatus.ACTIVE };
         }
-
-        return Promise.resolve(null);
+        return null;
       },
     );
 
     prisma.clubAdminAssignment.create.mockResolvedValue({
-      id: '55555555-5555-4555-8555-555555555555',
+      id: assignmentId,
       clubId,
       accountId: studentAccountId,
+      boardAppointmentId,
       position: ClubAdminPosition.PRESIDENT,
       assignedAt: new Date(),
       revokedAt: null,
     });
-
     prisma.clubAdminAssignment.findFirst.mockResolvedValue({
-  id: assignmentId,
-  clubId,
-  accountId: studentAccountId,
-  position: ClubAdminPosition.PRESIDENT,
-});
-
-prisma.clubAdminAssignment.updateMany.mockResolvedValue({
-  count: 1,
-});
-  });
-
-  it('assigns an active student administrator', async () => {
-    const result = await service.assignAdmin(
+      id: assignmentId,
       clubId,
-      dto,
-      deanshipAccountId,
-    );
-
-    expect(result.accountId).toBe(studentAccountId);
-
-    expect(prisma.clubAdminAssignment.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          clubId,
-          accountId: studentAccountId,
-          position: ClubAdminPosition.PRESIDENT,
-          assignedById: deanshipAccountId,
-        },
-      }),
-    );
+      accountId: studentAccountId,
+      position: ClubAdminPosition.PRESIDENT,
+    });
+    prisma.clubAdminAssignment.updateMany.mockResolvedValue({ count: 1 });
   });
 
-  it('rejects assignments to nonexistent clubs', async () => {
-    prisma.club.findUnique.mockResolvedValue(null);
-
-    await expect(
-      service.assignAdmin(clubId, dto, deanshipAccountId),
-    ).rejects.toThrow(NotFoundException);
-  });
-
-  it('rejects non-student accounts', async () => {
-    prisma.account.findUnique.mockResolvedValue({
-      id: studentAccountId,
-      role: AccountRole.SUPERVISOR,
-      status: AccountStatus.ACTIVE,
-      universityStudentId: null,
+  describe('assignAdmin - Sprint 4.2 board-based assignments', () => {
+    it('assigns an administrator only through a current board appointment', async () => {
+      const result = await service.assignAdmin(clubId, dto, deanshipAccountId);
+      expect(result.accountId).toBe(studentAccountId);
+      expect(prisma.boardAppointment.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: boardAppointmentId } }),
+      );
+      expect(prisma.clubAdminAssignment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            clubId,
+            accountId: studentAccountId,
+            boardAppointmentId,
+            position: ClubAdminPosition.PRESIDENT,
+            assignedById: deanshipAccountId,
+          },
+        }),
+      );
     });
 
-    await expect(
-      service.assignAdmin(clubId, dto, deanshipAccountId),
-    ).rejects.toThrow(BadRequestException);
-  });
-
-  it('rejects disabled students', async () => {
-    prisma.account.findUnique.mockResolvedValue({
-      id: studentAccountId,
-      role: AccountRole.STUDENT,
-      status: AccountStatus.DISABLED,
-      universityStudentId: '44444444-4444-4444-8444-444444444444',
+    it('rejects a nonexistent club', async () => {
+      prisma.club.findUnique.mockResolvedValue(null);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(NotFoundException);
     });
 
-    await expect(
-      service.assignAdmin(clubId, dto, deanshipAccountId),
-    ).rejects.toThrow(BadRequestException);
-  });
-
-  it('rejects students without registered student records', async () => {
-    prisma.account.findUnique.mockResolvedValue({
-      id: studentAccountId,
-      role: AccountRole.STUDENT,
-      status: AccountStatus.ACTIVE,
-      universityStudentId: null,
+    it('rejects an archived club', async () => {
+      prisma.club.findUnique.mockResolvedValue({ status: 'ARCHIVED' });
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
     });
 
-    await expect(
-      service.assignAdmin(clubId, dto, deanshipAccountId),
-    ).rejects.toThrow(BadRequestException);
-  });
+    it('rejects a board appointment from another club', async () => {
+      prisma.boardAppointment.findUnique.mockResolvedValue({
+        ...currentAppointment(), clubId: '99999999-9999-4999-8999-999999999999',
+      });
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
 
-  it('rejects assignment requests from non-Deanship accounts', async () => {
-    prisma.account.findUnique.mockImplementation(
-      ({ where }: { where: { id: string } }) => {
-        if (where.id === studentAccountId) {
-          return Promise.resolve({
-            id: studentAccountId,
-            role: AccountRole.STUDENT,
-            status: AccountStatus.ACTIVE,
-            universityStudentId: '44444444-4444-4444-8444-444444444444',
-          });
-        }
+    it('rejects a missing board appointment', async () => {
+      prisma.boardAppointment.findUnique.mockResolvedValue(null);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
 
-        return Promise.resolve({
-          role: AccountRole.STUDENT,
-          status: AccountStatus.ACTIVE,
-        });
-      },
-    );
+    it('rejects a future board appointment', async () => {
+      prisma.boardAppointment.findUnique.mockResolvedValue({
+        ...currentAppointment(), startDate: new Date('2099-01-01T00:00:00.000Z'),
+      });
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
 
-    await expect(
-      service.assignAdmin(clubId, dto, deanshipAccountId),
-    ).rejects.toThrow(BadRequestException);
-  });
+    it('rejects an expired board appointment', async () => {
+      prisma.boardAppointment.findUnique.mockResolvedValue({
+        ...currentAppointment(), endDate: new Date('2025-12-31T00:00:00.000Z'),
+      });
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
 
-  it('rejects duplicate active assignments', async () => {
-    const uniqueError = new Prisma.PrismaClientKnownRequestError(
-      'Unique constraint failed',
-      {
-        code: 'P2002',
-        clientVersion: '7.10.0',
-      },
-    );
+    it('rejects a non-student board account', async () => {
+      const appointment = currentAppointment();
+      appointment.student.account.role = AccountRole.SUPERVISOR;
+      prisma.boardAppointment.findUnique.mockResolvedValue(appointment);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
 
-    prisma.clubAdminAssignment.create.mockRejectedValue(uniqueError);
+    it('rejects a disabled board account', async () => {
+      const appointment = currentAppointment();
+      appointment.student.account.status = AccountStatus.DISABLED;
+      prisma.boardAppointment.findUnique.mockResolvedValue(appointment);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
 
-    await expect(
-      service.assignAdmin(clubId, dto, deanshipAccountId),
-    ).rejects.toThrow(ConflictException);
+    it('rejects a board student without a ClubHub account', async () => {
+      prisma.boardAppointment.findUnique.mockResolvedValue({
+        ...currentAppointment(), student: { account: null },
+      });
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects non-Deanship assigners', async () => {
+      prisma.account.findUnique.mockResolvedValue({ role: AccountRole.STUDENT, status: AccountStatus.ACTIVE });
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(ForbiddenException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects an already occupied administrator position', async () => {
+      prisma.clubAdminAssignment.findMany.mockResolvedValue([{
+        clubId, accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', position: ClubAdminPosition.PRESIDENT,
+      }]);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(ConflictException);
+    });
+
+    it('rejects a student who already administers a club', async () => {
+      prisma.clubAdminAssignment.findMany.mockResolvedValue([{
+        clubId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        accountId: studentAccountId,
+        position: ClubAdminPosition.SECOND_ADMIN,
+      }]);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(ConflictException);
+    });
+
+    it('rejects a third administrator in the same club', async () => {
+      prisma.clubAdminAssignment.findMany.mockResolvedValue([
+        { clubId, accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', position: ClubAdminPosition.SECOND_ADMIN },
+        { clubId, accountId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', position: ClubAdminPosition.SECOND_ADMIN },
+      ]);
+      await expect(service.assignAdmin(clubId, dto, deanshipAccountId)).rejects.toThrow(ConflictException);
+    });
   });
 
   describe('revokeAdmin', () => {
-  it('revokes an active administrator assignment', async () => {
+  it('revokes an active administrator assignment', async() => {
     const result = await service.revokeAdmin(
       clubId,
       assignmentId,
@@ -291,6 +300,16 @@ describe('getMyAdminAssignments', () => {
           club: {
             status: 'ACTIVE',
           },
+          boardAppointment: {
+            is: expect.objectContaining({
+              endedAt: null,
+              startDate: expect.objectContaining({ lte: expect.any(Date) }),
+              OR: [
+                { endDate: null },
+                { endDate: { gte: expect.any(Date) } },
+              ],
+            }),
+          },
         },
       }),
     );
@@ -360,6 +379,16 @@ describe('getClubAdminOverview', () => {
           club: {
             status: 'ACTIVE',
           },
+          boardAppointment: {
+            is: expect.objectContaining({
+              endedAt: null,
+              startDate: expect.objectContaining({ lte: expect.any(Date) }),
+              OR: [
+                { endDate: null },
+                { endDate: { gte: expect.any(Date) } },
+              ],
+            }),
+          },
         },
       }),
     );
@@ -395,7 +424,7 @@ describe('getClubAdminOverview', () => {
     );
   });
 
-  it('denies access to disabled student accounts', async () => {
+  it('denies access to disabled student accounts', async() => {
     prisma.account.findUnique.mockResolvedValue({
       id: studentAccountId,
       role: AccountRole.STUDENT,
@@ -432,6 +461,16 @@ describe('assertCanManageClub', () => {
           revokedAt: null,
           club: {
             status: 'ACTIVE',
+          },
+          boardAppointment: {
+            is: expect.objectContaining({
+              endedAt: null,
+              startDate: expect.objectContaining({ lte: expect.any(Date) }),
+              OR: [
+                { endDate: null },
+                { endDate: { gte: expect.any(Date) } },
+              ],
+            }),
           },
         },
       }),

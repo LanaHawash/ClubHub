@@ -45,4 +45,24 @@ describe('StudentsController - Sprint 2.4 Authorization', () => {
 
     expect(roles).toEqual([AccountRole.DEANSHIP]);
   });
+  describe('Sprint 4.2.2 - Board candidate search authorization', () => {
+  it('restricts board candidate search to DEANSHIP accounts', () => {
+    const roles = reflector.get(
+      'roles',
+      StudentsController.prototype.searchBoardCandidates,
+    );
+
+    expect(roles).toEqual([AccountRole.DEANSHIP]);
+  });
+
+  it('uses the controller authentication guards', () => {
+    const guards = Reflect.getMetadata(
+      GUARDS_METADATA,
+      StudentsController,
+    );
+
+    expect(guards).toContain(JwtAuthGuard);
+    expect(guards).toContain(RolesGuard);
+  });
+});
 });

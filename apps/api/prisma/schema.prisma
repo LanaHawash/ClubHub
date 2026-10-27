@@ -54,38 +54,39 @@ model Major {
 }
 
 model UniversityStudent {
-  id            String              @id @default(uuid()) @db.Uuid
-  universityId  String              @unique @db.VarChar(20)
-  email         String              @unique @db.VarChar(255)
-  fullName      String              @db.VarChar(150)
-  majorId       String              @db.Uuid
-  major         Major               @relation(fields: [majorId], references: [id], onDelete: Restrict)
-  account       Account?
-  verifications EmailVerification[]
-  createdAt     DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime            @updatedAt @db.Timestamptz(6)
+  id                String              @id @default(uuid()) @db.Uuid
+  universityId      String              @unique @db.VarChar(20)
+  email             String              @unique @db.VarChar(255)
+  fullName          String              @db.VarChar(150)
+  majorId           String              @db.Uuid
+  major             Major               @relation(fields: [majorId], references: [id], onDelete: Restrict)
+  account           Account?
+  boardAppointments BoardAppointment[]
+  verifications     EmailVerification[]
+  createdAt         DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime            @updatedAt @db.Timestamptz(6)
 }
 
 model Account {
-  id                  String               @id @default(uuid()) @db.Uuid
-  email               String               @unique @db.VarChar(255)
-  passwordHash        String               @db.VarChar(255)
-  role                AccountRole
-  status              AccountStatus        @default(ACTIVE)
-  universityStudentId String?              @unique @db.Uuid
-  universityStudent   UniversityStudent?   @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
-  profilePhotoUrl     String?              @db.Text
-  eventRegistrations  EventRegistration[]
-  refreshSessions     RefreshSession[]
-  passwordResets      PasswordResetToken[]
-  supervisorProfile   SupervisorProfile?
+  id                   String                @id @default(uuid()) @db.Uuid
+  email                String                @unique @db.VarChar(255)
+  passwordHash         String                @db.VarChar(255)
+  role                 AccountRole
+  status               AccountStatus         @default(ACTIVE)
+  universityStudentId  String?               @unique @db.Uuid
+  universityStudent    UniversityStudent?    @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
+  profilePhotoUrl      String?               @db.Text
+  eventRegistrations   EventRegistration[]
+  refreshSessions      RefreshSession[]
+  passwordResets       PasswordResetToken[]
+  supervisorProfile    SupervisorProfile?
   clubAdminAssignments ClubAdminAssignment[] @relation("ClubAdminStudent")
 
-clubAdminAssignmentsGranted ClubAdminAssignment[] @relation("ClubAdminAssignedBy")
+  clubAdminAssignmentsGranted ClubAdminAssignment[] @relation("ClubAdminAssignedBy")
 
-clubAdminAssignmentsRevoked ClubAdminAssignment[] @relation("ClubAdminRevokedBy")
-  createdAt           DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt           DateTime             @updatedAt @db.Timestamptz(6)
+  clubAdminAssignmentsRevoked ClubAdminAssignment[] @relation("ClubAdminRevokedBy")
+  createdAt                   DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt                   DateTime              @updatedAt @db.Timestamptz(6)
 }
 
 model EmailVerification {
@@ -103,25 +104,26 @@ model EmailVerification {
 }
 
 model Club {
-  id             String              @id @default(uuid()) @db.Uuid
-  name           String              @unique @db.VarChar(150)
-  description    String              @db.Text
-  logoUrl        String?             @db.Text
-  classification ClubClassification
-  facultyId      String?             @db.Uuid
-  faculty        Faculty?            @relation(fields: [facultyId], references: [id], onDelete: Restrict)
-  supervisorId   String?             @db.Uuid
-  supervisor     SupervisorProfile?  @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
-  adminAssignments ClubAdminAssignment[]
-  status         ClubStatus          @default(ACTIVE)
-  foundedYear    Int?
-  contactEmail   String              @db.VarChar(255)
-  meetingInfo    String?             @db.Text
-  eligibleMajors ClubEligibleMajor[]
-  labels         ClubLabel[]
-  events         Event[]
-  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime            @updatedAt @db.Timestamptz(6)
+  id                String                @id @default(uuid()) @db.Uuid
+  name              String                @unique @db.VarChar(150)
+  description       String                @db.Text
+  logoUrl           String?               @db.Text
+  classification    ClubClassification
+  facultyId         String?               @db.Uuid
+  faculty           Faculty?              @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  supervisorId      String?               @db.Uuid
+  supervisor        SupervisorProfile?    @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
+  adminAssignments  ClubAdminAssignment[]
+  boardAppointments BoardAppointment[]
+  status            ClubStatus            @default(ACTIVE)
+  foundedYear       Int?
+  contactEmail      String                @db.VarChar(255)
+  meetingInfo       String?               @db.Text
+  eligibleMajors    ClubEligibleMajor[]
+  labels            ClubLabel[]
+  events            Event[]
+  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime              @updatedAt @db.Timestamptz(6)
 
   @@index([status, name])
 }
@@ -328,33 +330,60 @@ model SupervisorProfile {
 model ClubAdminAssignment {
   id String @id @default(uuid()) @db.Uuid
 
-  clubId String @db.Uuid
-  accountId String @db.Uuid
+  clubId             String            @db.Uuid
+  accountId          String            @db.Uuid
+  boardAppointmentId String?           @db.Uuid
+  position           ClubAdminPosition
 
-  position ClubAdminPosition
+  assignedAt DateTime  @default(now()) @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
 
-  assignedAt DateTime @default(now()) @db.Timestamptz(6)
-  revokedAt DateTime? @db.Timestamptz(6)
-
-  assignedById String @db.Uuid
-  revokedById String? @db.Uuid
+  assignedById String  @db.Uuid
+  revokedById  String? @db.Uuid
 
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  club       Club     @relation(fields: [clubId], references: [id], onDelete: Restrict)
+  club Club @relation(fields: [clubId], references: [id], onDelete: Restrict)
 
-  account    Account  @relation("ClubAdminStudent", fields: [accountId], references: [id], onDelete: Restrict)
+  account Account @relation("ClubAdminStudent", fields: [accountId], references: [id], onDelete: Restrict)
 
-  assignedBy Account  @relation("ClubAdminAssignedBy", fields: [assignedById], references: [id], onDelete: Restrict)
+  assignedBy Account @relation("ClubAdminAssignedBy", fields: [assignedById], references: [id], onDelete: Restrict)
 
-  revokedBy  Account? @relation("ClubAdminRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  revokedBy Account? @relation("ClubAdminRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+
+  boardAppointment BoardAppointment? @relation(fields: [boardAppointmentId], references: [id], onDelete: Restrict)
 
   @@index([clubId, revokedAt])
   @@index([accountId, revokedAt])
+  @@index([boardAppointmentId])
 }
 
 enum ClubAdminPosition {
   PRESIDENT
   SECOND_ADMIN
+}
+
+model BoardAppointment {
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId    String @db.Uuid
+  studentId String @db.Uuid
+
+  position String @db.VarChar(100)
+
+  startDate DateTime  @db.Date
+  endDate   DateTime? @db.Date
+  endedAt   DateTime? @db.Timestamptz(6)
+
+  club    Club              @relation(fields: [clubId], references: [id], onDelete: Restrict)
+  student UniversityStudent @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  adminAssignments ClubAdminAssignment[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([clubId, startDate])
+  @@index([studentId])
 }

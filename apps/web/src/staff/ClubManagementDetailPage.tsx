@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import ClubAdministratorsPanel from './ClubAdministratorsPanel'
+import BoardAppointmentsPanel from './BoardAppointmentsPanel'
 import ClubLabelsPicker, { type ClubLabelsSelection } from './ClubLabelsPicker'
 type Club = {
   id: string
@@ -917,6 +918,8 @@ async function saveClubDetails() {
         </div>
       </section>
       <div className="lg:col-span-2">
+      <BoardAppointmentsPanel clubId={club.id} accessToken={accessToken} />
+      <div className="mt-6" />
       {/* Sprint 3.5: Deanship administrator assignments */}
       <ClubAdministratorsPanel
         clubId={club.id}

@@ -96,5 +96,24 @@ describe('Sprint 3.4 - Supervisor assignment authorization', () => {
     expect(guards).toContain(RolesGuard);
   });
 });
+describe('Sprint 4.1 - Eligibility authorization', () => {
+  it('restricts eligibility checks to students', () => {
+    const roles = reflector.get(
+      'roles',
+      ClubsController.prototype.getMyEligibility,
+    );
 
+    expect(roles).toEqual([AccountRole.STUDENT]);
+  });
+
+  it('requires JWT authentication and role guards', () => {
+    const guards = Reflect.getMetadata(
+      GUARDS_METADATA,
+      ClubsController.prototype.getMyEligibility,
+    );
+
+    expect(guards).toContain(JwtAuthGuard);
+    expect(guards).toContain(RolesGuard);
+  });
+});
 });

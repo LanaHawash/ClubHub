@@ -1,8 +1,9 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-
+import { AccountRole, AccountStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 
 @Injectable()
@@ -86,4 +87,117 @@ export class StudentsService {
 
     return student;
   }
+  // Sprint 4.2.2: Search active ClubHub student accounts
+// for club board appointments.
+async searchBoardCandidates(
+  search?: string,
+  pageParam?: string,
+  limitParam?: string,
+) {
+  const query = search?.trim() ?? '';
+
+  if (query.length < 2) {
+    throw new BadRequestException(
+      'Search must contain at least 2 characters.',
+    );
+  }
+
+  if (query.length > 150) {
+    throw new BadRequestException(
+      'Search must not exceed 150 characters.',
+    );
+  }
+
+  const page = pageParam === undefined ? 1 : Number(pageParam);
+  const limit = limitParam === undefined ? 10 : Number(limitParam);
+
+  if (!Number.isSafeInteger(page) || page < 1) {
+    throw new BadRequestException(
+      'Page must be a positive integer.',
+    );
+  }
+
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 50
+  ) {
+    throw new BadRequestException(
+      'Limit must be between 1 and 50.',
+    );
+  }
+
+  const where = {
+    account: {
+      is: {
+        role: AccountRole.STUDENT,
+        status: AccountStatus.ACTIVE,
+      },
+    },
+    OR: [
+      {
+        fullName: {
+          contains: query,
+          mode: 'insensitive' as const,
+        },
+      },
+      {
+        universityId: {
+          contains: query,
+        },
+      },
+    ],
+  };
+
+  const skip = (page - 1) * limit;
+
+  const [students, total] = await this.prisma.$transaction([
+    this.prisma.universityStudent.findMany({
+      where,
+      select: {
+        id: true,
+        universityId: true,
+        fullName: true,
+        email: true,
+        major: {
+          select: {
+            id: true,
+            name: true,
+            faculty: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        },
+        account: {
+          select: {
+            id: true,
+          },
+        },
+      },
+      orderBy: [
+        { fullName: 'asc' },
+        { universityId: 'asc' },
+      ],
+      skip,
+      take: limit,
+    }),
+
+    this.prisma.universityStudent.count({
+      where,
+    }),
+  ]);
+
+  return {
+    data: students,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  };
+}
 }

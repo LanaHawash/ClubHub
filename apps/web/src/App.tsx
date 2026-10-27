@@ -429,9 +429,21 @@ if (page === 'admin' || page === 'staff') {
             onEvents={() => setPage('events')}
             onClubClick={openClub}
             isSignedIn={Boolean(session)}
+            accessToken={
+              session?.account.role === 'STUDENT'
+                ? session.accessToken
+                : null
+            }
           />
         ) : page === 'clubs' ? (
-          <Clubs onClubClick={openClub} />
+          <Clubs
+            onClubClick={openClub}
+            accessToken={
+              session?.account.role === 'STUDENT'
+                ? session.accessToken
+                : null
+            }
+          />
         ) : page === 'club' && selectedClubId ? (
           <ClubPage
             clubId={selectedClubId}

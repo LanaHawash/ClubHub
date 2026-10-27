@@ -2,35 +2,39 @@ import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 
 type Position = 'PRESIDENT' | 'SECOND_ADMIN'
-type Student = {
+type BoardAppointment = {
   id: string
-  universityId: string
-  fullName: string
-  account: { id: string; role: string; status: string } | null
+  studentId: string
+  position: string
+  startDate: string
+  endDate: string | null
+  endedAt?: string | null
+  student: { fullName: string; universityId: string }
 }
 type Assignment = {
   id: string
   clubId: string
   accountId: string
+  boardAppointmentId?: string | null
   position: Position
   account: {
     id: string
     email: string
-    universityStudent: { fullName: string; universityId: string } | null
+    universityStudent: { id?: string; fullName: string; universityId: string } | null
   }
 }
 type Props = { clubId: string; accessToken: string }
 const SLOTS: Position[] = ['PRESIDENT', 'SECOND_ADMIN']
 const inputCls = 'w-full rounded-xl border border-line bg-paper px-4 py-3 text-sm outline-none focus:border-plum focus:ring-2 focus:ring-plum/20'
 
-async function readError(response: Response) {
+async function readError(response: Response): Promise<string> {
   const data: { message?: string | string[] } = await response.json().catch(() => ({}))
   return Array.isArray(data.message) ? data.message.join(' ') : data.message || `Request failed (${response.status})`
 }
 
 export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) {
   const [assignments, setAssignments] = useState<Assignment[]>([])
-  const [students, setStudents] = useState<Student[]>([])
+  const [board, setBoard] = useState<BoardAppointment[]>([])
   const [selection, setSelection] = useState<Record<Position, string>>({ PRESIDENT: '', SECOND_ADMIN: '' })
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -38,12 +42,20 @@ export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) 
   const [notice, setNotice] = useState('')
 
   const reload = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch(`/api/clubs/${clubId}/admin-assignments`, {
-      headers: { Authorization: `Bearer ${accessToken}` }, signal, cache: 'no-store',
-    })
-    if (!response.ok) throw new Error(await readError(response))
-    const data: Assignment[] = await response.json()
-    if (!signal?.aborted) setAssignments(data)
+    const headers = { Authorization: `Bearer ${accessToken}` }
+    const [assignmentsResponse, boardResponse] = await Promise.all([
+      fetch(`/api/clubs/${clubId}/admin-assignments`, { headers, signal, cache: 'no-store' }),
+      fetch(`/api/clubs/${clubId}/board`, { headers, signal, cache: 'no-store' }),
+    ])
+    if (!assignmentsResponse.ok) throw new Error(await readError(assignmentsResponse))
+    if (!boardResponse.ok) throw new Error(await readError(boardResponse))
+    const [assigned, members]: [Assignment[], BoardAppointment[]] = await Promise.all([
+      assignmentsResponse.json(), boardResponse.json(),
+    ])
+    if (!signal?.aborted) {
+      setAssignments(assigned)
+      setBoard(members)
+    }
   }, [clubId, accessToken])
 
   useEffect(() => {
@@ -52,38 +64,47 @@ export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) 
     setError('')
     setNotice('')
     setSelection({ PRESIDENT: '', SECOND_ADMIN: '' })
-    Promise.all([
-      fetch(`/api/clubs/${clubId}/admin-assignments`, {
-        headers: { Authorization: `Bearer ${accessToken}` }, signal: controller.signal, cache: 'no-store',
-      }),
-      fetch('/api/students', {
-        headers: { Authorization: `Bearer ${accessToken}` }, signal: controller.signal, cache: 'no-store',
-      }),
-    ]).then(async ([a, s]) => {
-      if (!a.ok) throw new Error(await readError(a))
-      if (!s.ok) throw new Error(await readError(s))
-      const [assigned, registered]: [Assignment[], Student[]] = await Promise.all([a.json(), s.json()])
-      if (!controller.signal.aborted) {
-        setAssignments(assigned)
-        setStudents(registered.filter(x => x.account?.role === 'STUDENT' && x.account.status === 'ACTIVE'))
-      }
-    }).catch((err: unknown) => {
-      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : 'Unable to load administrators')
-    }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false)
-    })
+    reload(controller.signal)
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) setError(err instanceof Error ? err.message : 'Unable to load club administration')
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [clubId, accessToken])
+  }, [reload])
 
-  const byPosition = (p: Position) => assignments.find(a => a.position === p)
-  const freeStudents = students.filter(s => s.account && !assignments.some(a => a.accountId === s.account?.id))
+  // Refresh after board appointments are changed in the adjacent panel.
+  useEffect(() => {
+    const onFocus = () => { if (!busy) void reload().catch(() => undefined) }
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('clubhub:board-changed', onFocus)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('clubhub:board-changed', onFocus)
+    }
+  }, [reload, busy])
+
+  const byPosition = (position: Position) => assignments.find((a) => a.position === position)
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const currentBoard = board.filter((m) => !m.endedAt && m.startDate.slice(0, 10) <= today && (!m.endDate || m.endDate.slice(0, 10) >= today))
+  const assignedStudentIds = new Set(assignments.map((a) => a.account.universityStudent?.id).filter(Boolean))
+  const assignedBoardIds = new Set(assignments.map((a) => a.boardAppointmentId).filter(Boolean))
+
+  function optionsFor(position: Position) {
+    const opposite = position === 'PRESIDENT' ? 'SECOND_ADMIN' : 'PRESIDENT'
+    return currentBoard.filter((member) =>
+      !assignedBoardIds.has(member.id) &&
+      !assignedStudentIds.has(member.studentId) &&
+      member.id !== selection[opposite] &&
+      !currentBoard.some((selected) => selected.id === selection[opposite] && selected.studentId === member.studentId),
+    )
+  }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy || loading) return
-    const pending = SLOTS.filter(p => !byPosition(p) && selection[p])
-    if (pending.length === 0) return
-    // Each assignment is saved through the authenticated Deanship API.
+    const pending = SLOTS.filter((position) => !byPosition(position) && selection[position])
+    if (!pending.length) return
     setBusy(true)
     setError('')
     setNotice('')
@@ -92,7 +113,7 @@ export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) 
         const response = await fetch(`/api/clubs/${clubId}/admin-assignments`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ accountId: selection[position], position }),
+          body: JSON.stringify({ boardAppointmentId: selection[position], position }),
         })
         if (!response.ok) throw new Error(await readError(response))
         await reload()
@@ -100,21 +121,20 @@ export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) 
       setSelection({ PRESIDENT: '', SECOND_ADMIN: '' })
       setNotice('Club administrator assignments saved.')
     } catch (err) {
-      // Reload even if a later request failed: earlier assignments might have succeeded.
       await reload().catch(() => undefined)
-      setError(err instanceof Error ? err.message : 'Unable to save administrator assignments')
+      setError(err instanceof Error ? err.message : 'Unable to save administrators')
     } finally {
       setBusy(false)
     }
   }
 
-  async function revoke(a: Assignment) {
-    if (busy || !window.confirm('Revoke this administrator’s access? Their student account and club data will remain intact.')) return
+  async function revoke(assignment: Assignment) {
+    if (busy || !window.confirm('Revoke this administrator’s access? Their student account and club history will remain intact.')) return
     setBusy(true)
     setError('')
     setNotice('')
     try {
-      const response = await fetch(`/api/clubs/${clubId}/admin-assignments/${a.id}/revoke`, {
+      const response = await fetch(`/api/clubs/${clubId}/admin-assignments/${assignment.id}/revoke`, {
         method: 'PATCH', headers: { Authorization: `Bearer ${accessToken}` },
       })
       if (!response.ok) throw new Error(await readError(response))
@@ -129,21 +149,20 @@ export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) 
 
   return (
     <section className="rounded-3xl border border-ink/10 bg-card p-5 sm:p-6 lg:col-span-2">
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <h2 className="font-display text-2xl leading-none">Board and club administration</h2>
-      </div>
-      {loading ? <p className="text-sm text-ink-2">Loading administrators…</p> : (
+      <h2 className="font-display text-2xl leading-none">Club administration</h2>
+      {loading ? <p className="mt-5 text-sm text-ink-2">Loading administrators…</p> : (
         <form onSubmit={save}>
-          {/* Same Figma two-column account-holder layout, connected to student accounts. */}
           <div className="mt-5 border-t border-ink/10 pt-4">
             <p className="text-sm font-semibold">Who manages the club?</p>
-            <p className="mb-3 text-xs text-ink-2">Two individual student accounts, one President and one Second Administrator. A student may manage only one club.</p>
+            <p className="mb-3 text-xs text-ink-2">Choose up to two current board members. One President and one Second Administrator. Board position and administrator permission are separate.</p>
             <div className="grid gap-4 sm:grid-cols-2">
               {SLOTS.map((position, index) => {
                 const assignment = byPosition(position)
                 return (
-                  <label key={position} className="block">
-                    <span className="mb-1.5 block text-sm font-semibold">{index === 0 ? 'Club administrator 1 · President' : 'Club administrator 2 · Second Administrator'}</span>
+                  <div key={position}>
+                    <label htmlFor={`board-admin-${position}`} className="mb-1.5 block text-sm font-semibold">
+                      {index === 0 ? 'Club administrator 1 · President' : 'Club administrator 2 · Second Administrator'}
+                    </label>
                     {assignment ? (
                       <div className="space-y-2">
                         <div className={`${inputCls} min-h-11`}>
@@ -153,23 +172,24 @@ export default function ClubAdministratorsPanel({ clubId, accessToken }: Props) 
                         <button type="button" disabled={busy} onClick={() => void revoke(assignment)} className="rounded-full border border-ink/20 px-4 py-2 text-sm font-semibold hover:bg-ink/5 disabled:opacity-50">Revoke access</button>
                       </div>
                     ) : (
-                      <select className={inputCls} value={selection[position]} disabled={busy} onChange={e => setSelection(current => ({ ...current, [position]: e.target.value }))}>
-                        <option value="">Choose a registered student…</option>
-                        {freeStudents.filter(s => s.account?.id !== selection[position === 'PRESIDENT' ? 'SECOND_ADMIN' : 'PRESIDENT']).map(s => (
-                          <option key={s.id} value={s.account!.id}>{s.fullName} · {s.universityId}</option>
+                      <select id={`board-admin-${position}`} className={inputCls} value={selection[position]} disabled={busy} onChange={(e) => setSelection((previous) => ({ ...previous, [position]: e.target.value }))}>
+                        <option value="">Choose from current board…</option>
+                        {optionsFor(position).map((member) => (
+                          <option key={member.id} value={member.id}>{member.student.fullName} · {member.student.universityId} · {member.position}</option>
                         ))}
                       </select>
                     )}
-                  </label>
+                  </div>
                 )
               })}
             </div>
+            {currentBoard.length === 0 && <p className="mt-3 text-xs text-ink-2">Add an eligible board member first, then assign administrator access.</p>}
           </div>
           {error && <p role="alert" className="mt-3 text-sm font-medium text-[#8a1f47]">{error}</p>}
           {notice && <p role="status" className="mt-3 text-sm text-ink-2">{notice}</p>}
           <div className="mt-5 flex items-center justify-between gap-3 border-t border-ink/10 pt-4">
-            <p className="text-xs text-ink-2">Assignments use existing student accounts. Club and historical data are preserved.</p>
-            <button type="submit" disabled={busy || !SLOTS.some(p => !byPosition(p) && selection[p])} className="shrink-0 rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper transition hover:bg-plum-2 disabled:opacity-50">{busy ? 'Saving…' : 'Save administrators'}</button>
+            <p className="text-xs text-ink-2">Administrators are selected only from current board appointments. Historical records are preserved.</p>
+            <button type="submit" disabled={busy || !SLOTS.some((position) => !byPosition(position) && selection[position])} className="shrink-0 rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper transition hover:bg-plum-2 disabled:opacity-50">{busy ? 'Saving…' : 'Save administrators'}</button>
           </div>
         </form>
       )}

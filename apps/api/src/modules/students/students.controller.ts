@@ -3,6 +3,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -33,6 +34,22 @@ export class StudentsController {
       request.user.id,
     );
   }
+
+  // Sprint 4.2.2: Deanship searches existing
+// ClubHub accounts for board appointments.
+@Get('board-candidates')
+@Roles(AccountRole.DEANSHIP)
+searchBoardCandidates(
+  @Query('search') search?: string,
+  @Query('page') page?: string,
+  @Query('limit') limit?: string,
+) {
+  return this.studentsService.searchBoardCandidates(
+    search,
+    page,
+    limit,
+  );
+}
 
   @Get()
   @Roles(AccountRole.DEANSHIP)

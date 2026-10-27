@@ -362,7 +362,7 @@ async findOneForDeanship(id: string) {
   return club;
 }
 
-  async create(dto: CreateClubDto) {
+  async create(dto: CreateClubDto, assignedById?: string) {
   const name = dto.name.trim();
   const description = dto.description.trim();
   const contactEmail = dto.contactEmail.trim().toLowerCase();
@@ -433,7 +433,7 @@ try {
     );
 
     // Create the club and its relationships together.
-    return tx.club.create({
+    const created = await tx.club.create({
       data: {
         name,
         description,
@@ -484,6 +484,70 @@ try {
         },
       },
     });
+    // The form's board selections are held in React until this transaction.
+    // Every appointment and administrator is committed atomically with the club.
+    const board = dto.boardMembers ?? [];
+    const admins = dto.administrators ?? [];
+    if (admins.length && !assignedById) throw new BadRequestException('Authenticated Deanship account required.');
+    if (admins.length > 2 || new Set(admins.map((a) => a.position)).size !== admins.length ||
+        new Set(admins.map((a) => a.boardIndex)).size !== admins.length) {
+      throw new BadRequestException('Choose at most one distinct board member for each administrator position.');
+    }
+    if (new Set(board.map((b) => b.studentId)).size !== board.length) {
+      throw new BadRequestException('A student may appear only once in the initial board.');
+    }
+    const parseDay = (value: string) => {
+      const date = new Date(`${value}T00:00:00.000Z`);
+      if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+        throw new BadRequestException('Invalid board appointment calendar date.');
+      }
+      return date;
+    };
+    const currentDay = parseDay(new Date().toISOString().slice(0, 10));
+    const appointed: { id: string; accountId: string; startDate: Date; endDate: Date | null }[] = [];
+    for (const entry of board) {
+      const student = await tx.universityStudent.findUnique({
+        where: { id: entry.studentId },
+        select: { major: { select: { id: true, facultyId: true } },
+          account: { select: { id: true, role: true, status: true } } },
+      });
+      if (!student?.account || student.account.role !== AccountRole.STUDENT || student.account.status !== AccountStatus.ACTIVE) {
+        throw new BadRequestException('Every board member must have an active ClubHub student account.');
+      }
+      if ((dto.classification === 'FACULTY_BASED' && student.major.facultyId !== dto.facultyId) ||
+          (dto.classification === 'MAJOR_BASED' && !uniqueMajorIds.includes(student.major.id))) {
+        throw new BadRequestException('A selected board member is not eligible for this club.');
+      }
+      if (!entry.position.trim()) throw new BadRequestException('Board position is required.');
+      const startDate = parseDay(entry.startDate);
+      const endDate = entry.endDate ? parseDay(entry.endDate) : null;
+      if (endDate && endDate < startDate) throw new BadRequestException('Board end date cannot precede start date.');
+      const appointment = await tx.boardAppointment.create({
+        data: { clubId: created.id, studentId: entry.studentId, position: entry.position.trim(), startDate, endDate },
+        select: { id: true },
+      });
+      appointed.push({ id: appointment.id, accountId: student.account.id, startDate, endDate });
+    }
+    for (const admin of admins) {
+      const appointment = appointed[admin.boardIndex];
+      if (!appointment) throw new BadRequestException('Select administrators from the entered board members.');
+      if (appointment.endDate && appointment.endDate < currentDay) {
+        throw new BadRequestException('An expired board appointment cannot receive administrator access.');
+      }
+      const existing = await tx.clubAdminAssignment.findFirst({
+        where: { accountId: appointment.accountId, revokedAt: null,
+          club: { status: 'ACTIVE' },
+          boardAppointment: { is: { endedAt: null,
+            OR: [{ endDate: null }, { endDate: { gte: currentDay } }] } } },
+        select: { id: true },
+      });
+      if (existing) throw new ConflictException('This student already administers another active club.');
+      await tx.clubAdminAssignment.create({ data: {
+        clubId: created.id, accountId: appointment.accountId, boardAppointmentId: appointment.id,
+        position: admin.position, assignedById: assignedById!,
+      } });
+    }
+    return created;
   });
 } catch (error) {
   if (

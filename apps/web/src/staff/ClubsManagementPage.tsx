@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Plus, X, Trash2 } from 'lucide-react'
 import StudentBoardPicker from './StudentBoardPicker'
+import ClubImageUpload from './ClubImageUpload'
 import ClubLabelsPicker from './ClubLabelsPicker'
 import type { ClubLabelsSelection } from './ClubLabelsPicker'
 type ClubClassification = 'GENERAL' | 'FACULTY_BASED' | 'MAJOR_BASED'
@@ -597,7 +598,13 @@ const visibleClubs =
               <p className="mb-2 mt-6 text-sm font-semibold">Membership registration window<span className="font-normal text-ink-2">(optional)</span></p>
               <div className="inline-flex rounded-full border border-ink/15 p-0.5 text-sm font-semibold"><button type="button" aria-pressed={!windowEnabled} onClick={() => setWindowEnabled(false)} className={'rounded-full px-4 py-1.5 ' + (!windowEnabled ? 'bg-ink text-paper': 'text-ink-2')}>Any time</button><button type="button" aria-pressed={windowEnabled} onClick={() => setWindowEnabled(true)} className={'rounded-full px-4 py-1.5 ' + (windowEnabled ? 'bg-ink text-paper' : 'text-ink-2')}>Set a window</button></div>
               {windowEnabled && <div className="mt-3 grid max-w-md gap-4 sm:grid-cols-2"><label className="text-sm font-semibold">Opens<input type="date" value={windowStart} onChange={(e) => setWindowStart(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><label className="text-sm font-semibold">Closes<input type="date" value={windowEnd} onChange={(e) => setWindowEnd(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div>}
-              <details className="mt-5 rounded-xl border border-ink/10 px-4 py-3"><summary className="cursor-pointer text-sm font-semibold">Additional club information required by ClubHub</summary><label className="mt-3 block"><span className="mb-1.5 block text-sm font-semibold">Description</span><textarea required rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="text-sm font-semibold">Logo URL<input type="url" value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><label className="text-sm font-semibold">Founded year<input type="number" min="1800" max="2100" value={foundedYear} onChange={(e) => setFoundedYear(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div></details>
+              <details className="mt-5 rounded-xl border border-ink/10 px-4 py-3"><summary className="cursor-pointer text-sm font-semibold">Additional club information required by ClubHub</summary><label className="mt-3 block"><span className="mb-1.5 block text-sm font-semibold">Description</span><textarea required rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <ClubImageUpload
+                  value={logoUrl}
+                  onChange={setLogoUrl}
+                  accessToken={accessToken}
+                />
+              <label className="text-sm font-semibold">Founded year<input type="number" min="1800" max="2100" value={foundedYear} onChange={(e) => setFoundedYear(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div></details>
               <ClubLabelsPicker value={clubLabels} onChange={setClubLabels} disabled={saving} />
               {formError && <p role="alert" className="mt-4 rounded-xl bg-rose-soft px-4 py-3 text-sm font-medium text-[#8a1f47]">{formError}</p>}
               <button type="submit" disabled={saving} className="mt-6 inline-flex items-center justify-center rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:opacity-40">{saving ? 'Saving...' : 'Create club'}</button>

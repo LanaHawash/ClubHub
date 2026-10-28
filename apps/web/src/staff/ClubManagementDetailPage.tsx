@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import ClubAdministratorsPanel from './ClubAdministratorsPanel'
 import BoardAppointmentsPanel from './BoardAppointmentsPanel'
+import ClubImageUpload from './ClubImageUpload'
 import ClubLabelsPicker, { type ClubLabelsSelection } from './ClubLabelsPicker'
 type Club = {
   id: string
@@ -91,6 +92,7 @@ const [editDescription, setEditDescription] = useState('')
 const [editContactEmail, setEditContactEmail] = useState('')
 const [editFoundedYear, setEditFoundedYear] = useState('')
 const [editMeetingInfo, setEditMeetingInfo] = useState('')
+const [editLogoUrl, setEditLogoUrl] = useState('')
 const [updatingStatus, setUpdatingStatus] = useState(false)
   const [activeTab, setActiveTab] = useState<
   'overview' | 'members' | 'events' | 'finance'
@@ -426,6 +428,8 @@ function startEditing() {
   setEditContactEmail(club.contactEmail)
   setEditFoundedYear(club.foundedYear?.toString() ?? '')
   setEditMeetingInfo(club.meetingInfo ?? '')
+  setEditLogoUrl(club.logoUrl ?? '')
+  
 
   setEditError('')
   setIsEditing(true)
@@ -473,6 +477,7 @@ async function saveClubDetails() {
         contactEmail,
         foundedYear,
         meetingInfo: editMeetingInfo.trim() || null,
+        logoUrl: editLogoUrl.trim() || null,
       }),
     })
 
@@ -673,6 +678,7 @@ async function saveClubDetails() {
       />
     </label>
 
+
     <label className="block">
       <span className="mb-2 block text-sm font-semibold">
         Contact email
@@ -684,6 +690,23 @@ async function saveClubDetails() {
         className="w-full rounded-xl border border-ink/20 bg-card px-4 py-3"
       />
     </label>
+
+    {/* <label className="block">
+      <span className="mb-2 block text-sm font-semibold">Club image / logo URL</span>
+      <input
+        type="url"
+        value={editLogoUrl}
+        onChange={(event) => setEditLogoUrl(event.target.value)}
+        placeholder="https://example.com/club-image.jpg"
+        className="w-full rounded-xl border border-ink/20 bg-card px-4 py-3"
+      />
+      <span className="mt-1 block text-xs text-ink-2">Paste an image URL or clear it to remove the image. The photo appears beneath the cover colors on the student site.</span>
+    </label> */}
+    <ClubImageUpload
+  value={editLogoUrl}
+  onChange={setEditLogoUrl}
+  accessToken={accessToken}
+/>
 
     <label className="block">
       <span className="mb-2 block text-sm font-semibold">

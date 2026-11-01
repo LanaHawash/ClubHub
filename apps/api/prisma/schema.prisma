@@ -30,6 +30,11 @@ enum ClubStatus {
   ARCHIVED
 }
 
+enum MembershipRegistrationMode {
+  ALWAYS_OPEN
+  WINDOWED
+}
+
 model Faculty {
   id          String              @id @default(uuid()) @db.Uuid
   name        String              @unique @db.VarChar(150)
@@ -68,21 +73,21 @@ model UniversityStudent {
 }
 
 model Account {
-  id                   String                @id @default(uuid()) @db.Uuid
-  email                String                @unique @db.VarChar(255)
-  passwordHash         String                @db.VarChar(255)
-  role                 AccountRole
-  status               AccountStatus         @default(ACTIVE)
-  universityStudentId  String?               @unique @db.Uuid
-  universityStudent    UniversityStudent?    @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
-  profilePhotoUrl      String?               @db.Text
-  eventRegistrations   EventRegistration[]
-  refreshSessions      RefreshSession[]
-  passwordResets       PasswordResetToken[]
-  supervisorProfile    SupervisorProfile?
-  clubAdminAssignments ClubAdminAssignment[] @relation("ClubAdminStudent")
-
-  clubAdminAssignmentsGranted ClubAdminAssignment[] @relation("ClubAdminAssignedBy")
+  id                           String                     @id @default(uuid()) @db.Uuid
+  email                        String                     @unique @db.VarChar(255)
+  passwordHash                 String                     @db.VarChar(255)
+  role                         AccountRole
+  status                       AccountStatus              @default(ACTIVE)
+  universityStudentId          String?                    @unique @db.Uuid
+  universityStudent            UniversityStudent?         @relation(fields: [universityStudentId], references: [id], onDelete: Restrict)
+  profilePhotoUrl              String?                    @db.Text
+  eventRegistrations           EventRegistration[]
+  refreshSessions              RefreshSession[]
+  passwordResets               PasswordResetToken[]
+  supervisorProfile            SupervisorProfile?
+  clubAdminAssignments         ClubAdminAssignment[]      @relation("ClubAdminStudent")
+  createdMembershipFeeVersions ClubMembershipFeeVersion[]
+  clubAdminAssignmentsGranted  ClubAdminAssignment[]      @relation("ClubAdminAssignedBy")
 
   clubAdminAssignmentsRevoked ClubAdminAssignment[] @relation("ClubAdminRevokedBy")
   createdAt                   DateTime              @default(now()) @db.Timestamptz(6)
@@ -104,26 +109,29 @@ model EmailVerification {
 }
 
 model Club {
-  id                String                @id @default(uuid()) @db.Uuid
-  name              String                @unique @db.VarChar(150)
-  description       String                @db.Text
-  logoUrl           String?               @db.Text
-  classification    ClubClassification
-  facultyId         String?               @db.Uuid
-  faculty           Faculty?              @relation(fields: [facultyId], references: [id], onDelete: Restrict)
-  supervisorId      String?               @db.Uuid
-  supervisor        SupervisorProfile?    @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
-  adminAssignments  ClubAdminAssignment[]
-  boardAppointments BoardAppointment[]
-  status            ClubStatus            @default(ACTIVE)
-  foundedYear       Int?
-  contactEmail      String                @db.VarChar(255)
-  meetingInfo       String?               @db.Text
-  eligibleMajors    ClubEligibleMajor[]
-  labels            ClubLabel[]
-  events            Event[]
-  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime              @updatedAt @db.Timestamptz(6)
+  id                    String                     @id @default(uuid()) @db.Uuid
+  name                  String                     @unique @db.VarChar(150)
+  description           String                     @db.Text
+  logoUrl               String?                    @db.Text
+  classification        ClubClassification
+  facultyId             String?                    @db.Uuid
+  faculty               Faculty?                   @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  supervisorId          String?                    @db.Uuid
+  supervisor            SupervisorProfile?         @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
+  adminAssignments      ClubAdminAssignment[]
+  boardAppointments     BoardAppointment[]
+  status                ClubStatus                 @default(ACTIVE)
+  foundedYear           Int?
+  contactEmail          String                     @db.VarChar(255)
+  meetingInfo           String?                    @db.Text
+  eligibleMajors        ClubEligibleMajor[]
+  labels                ClubLabel[]
+  events                Event[]
+  membershipSettings    ClubMembershipSettings?
+  membershipFeeVersions ClubMembershipFeeVersion[]
+  registrationWindows   ClubRegistrationWindow[]
+  createdAt             DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime                   @updatedAt @db.Timestamptz(6)
 
   @@index([status, name])
 }
@@ -386,4 +394,70 @@ model BoardAppointment {
 
   @@index([clubId, startDate])
   @@index([studentId])
+}
+
+model ClubMembershipSettings {
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId String @unique @db.Uuid
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Restrict)
+
+  registrationMode MembershipRegistrationMode @default(ALWAYS_OPEN)
+
+  pendingFirstTimeFee Decimal @db.Decimal(10, 2)
+  pendingRenewalFee   Decimal @db.Decimal(10, 2)
+
+  currency String @db.VarChar(3)
+
+  configVersion Int @default(1)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+}
+
+model ClubMembershipFeeVersion {
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId String @db.Uuid
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Restrict)
+
+  firstTimeFee Decimal @db.Decimal(10, 2)
+  renewalFee   Decimal @db.Decimal(10, 2)
+
+  currency String @db.VarChar(3)
+
+  effectiveAt DateTime @db.Timestamptz(6)
+
+  createdById String?  @db.Uuid
+  createdBy   Account? @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  windows ClubRegistrationWindow[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([id, clubId], map: "membership_fee_version_id_club_unique")
+  @@index([clubId, effectiveAt])
+}
+
+model ClubRegistrationWindow {
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId String @db.Uuid
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Restrict)
+
+  opensAt  DateTime @db.Timestamptz(6)
+  closesAt DateTime @db.Timestamptz(6)
+
+  closedAt DateTime? @db.Timestamptz(6)
+
+  effectiveFeeVersionId String? @db.Uuid
+
+  effectiveFeeVersion ClubMembershipFeeVersion? @relation(fields: [effectiveFeeVersionId, clubId], references: [id, clubId], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([clubId, opensAt])
+  @@index([clubId, closesAt])
 }

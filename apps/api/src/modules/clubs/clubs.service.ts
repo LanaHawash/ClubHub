@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+
 import {
   Prisma,
   AccountStatus,
@@ -363,7 +364,54 @@ async findOneForDeanship(id: string) {
 }
 
   async create(dto: CreateClubDto, assignedById?: string) {
-  const name = dto.name.trim();
+  const membership = dto.membership;
+
+if (!membership) {
+  throw new BadRequestException(
+    'Membership configuration is required.',
+  );
+}
+
+if (
+  membership.registrationMode !== 'ALWAYS_OPEN' &&
+  membership.registrationMode !== 'WINDOWED'
+) {
+  throw new BadRequestException(
+    'Invalid membership registration mode.',
+  );
+}
+
+if (
+  membership.registrationMode === 'ALWAYS_OPEN' &&
+  (membership.opensAt || membership.closesAt)
+) {
+  throw new BadRequestException(
+    'Always-open clubs cannot have an initial registration window.',
+  );
+}
+
+if (membership.registrationMode === 'WINDOWED') {
+  if (!membership.opensAt || !membership.closesAt) {
+    throw new BadRequestException(
+      'Windowed clubs require opening and closing dates.',
+    );
+  }
+
+  const opensAt = new Date(membership.opensAt);
+  const closesAt = new Date(membership.closesAt);
+
+  if (
+    !Number.isFinite(opensAt.getTime()) ||
+    !Number.isFinite(closesAt.getTime()) ||
+    opensAt >= closesAt ||
+    opensAt <= new Date()
+  ) {
+    throw new BadRequestException(
+      'The registration window must start in the future and close after opening.',
+    );
+  }
+}
+    const name = dto.name.trim();
   const description = dto.description.trim();
   const contactEmail = dto.contactEmail.trim().toLowerCase();
 
@@ -422,68 +470,149 @@ async findOneForDeanship(id: string) {
       );
     }
   }
-await this.validateSupervisor(dto.supervisorId);
-try {
-  return await this.prisma.$transaction(async (tx) => {
-    // Resolve existing and newly entered labels.
-    const selectedLabelIds = await this.resolveClubLabelIds(
-      tx,
-      dto.labelIds ?? [],
-      dto.newLabels ?? [],
-    );
+  await this.validateSupervisor(dto.supervisorId);
+  try {
+    return await this.prisma.$transaction(async (tx) => {
+      // Resolve existing and newly entered labels.
+      const selectedLabelIds = await this.resolveClubLabelIds(
+        tx,
+        dto.labelIds ?? [],
+        dto.newLabels ?? [],
+      );
 
-    // Create the club and its relationships together.
-    const created = await tx.club.create({
+      // Create the club and its relationships together.
+      const created = await tx.club.create({
+        data: {
+          name,
+          description,
+          contactEmail,
+          classification: dto.classification,
+          facultyId: dto.facultyId ?? null,
+          logoUrl: dto.logoUrl ?? null,
+          foundedYear: dto.foundedYear ?? null,
+          supervisorId: dto.supervisorId ?? null,
+          meetingInfo: dto.meetingInfo ?? null,
+
+          eligibleMajors:
+            uniqueMajorIds.length > 0
+              ? {
+                  create: uniqueMajorIds.map((majorId) => ({
+                    major: {
+                      connect: { id: majorId },
+                    },
+                  })),
+                }
+              : undefined,
+
+          labels:
+            selectedLabelIds.length > 0
+              ? {
+                  create: selectedLabelIds.map((labelId) => ({
+                    label: {
+                      connect: { id: labelId },
+                    },
+                  })),
+                }
+              : undefined,
+        },
+
+        include: {
+          faculty: true,
+
+          eligibleMajors: {
+            include: {
+              major: true,
+            },
+          },
+
+          labels: {
+            include: {
+              label: true,
+            },
+          },
+        },
+      });
+      const membership = dto.membership;
+          if (!membership) {
+      throw new BadRequestException(
+        'Membership configuration is required.',
+      );
+    }
+    const firstTimeFee = new Prisma.Decimal(membership.firstTimeFee);
+    const renewalFee = new Prisma.Decimal(membership.renewalFee);
+
+    if (
+      !firstTimeFee.isFinite() ||
+      !renewalFee.isFinite() ||
+      firstTimeFee.lte(0) ||
+      renewalFee.lte(0) ||
+      firstTimeFee.decimalPlaces() > 2 ||
+      renewalFee.decimalPlaces() > 2
+    ) {
+      throw new BadRequestException(
+        'Membership fees must be positive amounts with at most two decimal places.',
+      );
+    }
+
+    await tx.clubMembershipSettings.create({
       data: {
-        name,
-        description,
-        contactEmail,
-        classification: dto.classification,
-        facultyId: dto.facultyId ?? null,
-        logoUrl: dto.logoUrl ?? null,
-        foundedYear: dto.foundedYear ?? null,
-        supervisorId: dto.supervisorId ?? null,
-        meetingInfo: dto.meetingInfo ?? null,
-
-        eligibleMajors:
-          uniqueMajorIds.length > 0
-            ? {
-                create: uniqueMajorIds.map((majorId) => ({
-                  major: {
-                    connect: { id: majorId },
-                  },
-                })),
-              }
-            : undefined,
-
-        labels:
-          selectedLabelIds.length > 0
-            ? {
-                create: selectedLabelIds.map((labelId) => ({
-                  label: {
-                    connect: { id: labelId },
-                  },
-                })),
-              }
-            : undefined,
-      },
-
-      include: {
-        faculty: true,
-
-        eligibleMajors: {
-          include: {
-            major: true,
-          },
-        },
-
-        labels: {
-          include: {
-            label: true,
-          },
-        },
+        clubId: created.id,
+        registrationMode: membership.registrationMode,
+        pendingFirstTimeFee: firstTimeFee,
+        pendingRenewalFee: renewalFee,
+        currency: membership.currency,
       },
     });
+if (membership.registrationMode === 'ALWAYS_OPEN') {
+  // Always-open clubs publish their membership prices immediately.
+  await tx.clubMembershipFeeVersion.create({
+    data: {
+      clubId: created.id,
+      firstTimeFee,
+      renewalFee,
+      currency: membership.currency,
+      effectiveAt: new Date(),
+      createdById: assignedById ?? null,
+    },
+  });
+} else if (membership.registrationMode === 'WINDOWED') {
+  // Windowed clubs require opening and closing dates.
+  if (!membership.opensAt || !membership.closesAt) {
+    throw new BadRequestException(
+      'Registration opening and closing dates are required.',
+    );
+  }
+
+  const opensAt = new Date(membership.opensAt);
+  const closesAt = new Date(membership.closesAt);
+  const now = new Date();
+
+  if (
+    !Number.isFinite(opensAt.getTime()) ||
+    !Number.isFinite(closesAt.getTime()) ||
+    opensAt >= closesAt
+  ) {
+    throw new BadRequestException(
+      'Invalid registration window dates.',
+    );
+  }
+
+  if (opensAt <= now) {
+    throw new BadRequestException(
+      'The initial registration window must start in the future.',
+    );
+  }
+
+  // Create a scheduled registration window.
+  // Prices are not locked until the window first opens.
+  await tx.clubRegistrationWindow.create({
+    data: {
+      clubId: created.id,
+      opensAt,
+      closesAt,
+    },
+  });
+}
     // The form's board selections are held in React until this transaction.
     // Every appointment and administrator is committed atomically with the club.
     const board = dto.boardMembers ?? [];

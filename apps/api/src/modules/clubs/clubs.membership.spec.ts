@@ -257,3 +257,319 @@ describe('ClubsService - Sprint 5 Membership Creation', () => {
     ).not.toHaveBeenCalled();
   });
 });
+describe('ClubsService - Sprint 5.C Membership Management', () => {
+  const clubId = 'club-sprint-5';
+  const windowId = 'window-sprint-5';
+
+  const activeClub = {
+    id: clubId,
+    status: 'ACTIVE',
+  };
+
+  const settings = {
+    clubId,
+    registrationMode: 'WINDOWED',
+    configVersion: 1,
+    pendingFirstTimeFee: {
+      equals: () => false,
+    },
+    pendingRenewalFee: {
+      equals: () => false,
+    },
+    currency: 'ILS',
+  };
+
+  const activeWindow = () => ({
+    id: windowId,
+    clubId,
+    opensAt: new Date(Date.now() - 60_000),
+    closesAt: new Date(Date.now() + 3_600_000),
+    closedAt: null,
+    effectiveFeeVersionId: null,
+  });
+
+  const txMock = {
+    club: {
+      findUnique: jest.fn(),
+    },
+
+    clubMembershipSettings: {
+      findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
+      updateMany: jest.fn(),
+    },
+
+    clubRegistrationWindow: {
+      findFirst: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
+      create: jest.fn(),
+      updateMany: jest.fn(),
+    },
+
+    clubMembershipFeeVersion: {
+      create: jest.fn(),
+    },
+  };
+
+  const prismaMock = {
+    $transaction: jest.fn<
+      (
+        callback: (tx: typeof txMock) => Promise<unknown>,
+      ) => Promise<unknown>
+    >(),
+  };
+
+  let service: ClubsService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    service = new ClubsService(
+      prismaMock as unknown as PrismaService,
+    );
+
+    prismaMock.$transaction.mockImplementation(
+      async (callback) => callback(txMock),
+    );
+
+    txMock.club.findUnique.mockResolvedValue(
+      activeClub as never,
+    );
+
+    txMock.clubMembershipSettings.findUnique.mockResolvedValue(
+      settings as never,
+    );
+
+    txMock.clubMembershipSettings.findUniqueOrThrow.mockResolvedValue(
+      settings as never,
+    );
+
+    txMock.clubMembershipSettings.updateMany.mockResolvedValue(
+      { count: 1 } as never,
+    );
+
+    txMock.clubRegistrationWindow.findFirst.mockResolvedValue(
+      activeWindow() as never,
+    );
+
+    txMock.clubRegistrationWindow.findUniqueOrThrow.mockResolvedValue(
+      activeWindow() as never,
+    );
+
+    txMock.clubRegistrationWindow.create.mockResolvedValue(
+      activeWindow() as never,
+    );
+
+    txMock.clubRegistrationWindow.updateMany.mockResolvedValue(
+      { count: 1 } as never,
+    );
+
+    txMock.clubMembershipFeeVersion.create.mockResolvedValue(
+      {} as never,
+    );
+  });
+
+  describe('Early registration closure', () => {
+    it('closes an active registration window', async () => {
+      const result = await service.closeRegistrationWindow(
+        clubId,
+        windowId,
+      );
+
+      expect(result).toBeDefined();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          id: windowId,
+          clubId,
+          closedAt: null,
+        }),
+        data: {
+          closedAt: expect.any(Date),
+        },
+      });
+    });
+
+    it('rejects closing a future registration window', async () => {
+      txMock.clubRegistrationWindow.findFirst.mockResolvedValue({
+        ...activeWindow(),
+        opensAt: new Date(Date.now() + 3_600_000),
+        closesAt: new Date(Date.now() + 7_200_000),
+      } as never);
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects closing an expired registration window', async () => {
+      txMock.clubRegistrationWindow.findFirst.mockResolvedValue({
+        ...activeWindow(),
+        opensAt: new Date(Date.now() - 7_200_000),
+        closesAt: new Date(Date.now() - 3_600_000),
+      } as never);
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects closing an already closed window', async () => {
+      txMock.clubRegistrationWindow.findFirst.mockResolvedValue({
+        ...activeWindow(),
+        closedAt: new Date(Date.now() - 10_000),
+      } as never);
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects closure for an archived club', async () => {
+      txMock.club.findUnique.mockResolvedValue({
+        id: clubId,
+        status: 'ARCHIVED',
+      } as never);
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects a window that does not belong to the club', async () => {
+      txMock.clubRegistrationWindow.findFirst.mockResolvedValue(
+        null as never,
+      );
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects closure when registration is always open', async () => {
+      txMock.clubMembershipSettings.findUnique.mockResolvedValue({
+        ...settings,
+        registrationMode: 'ALWAYS_OPEN',
+      } as never);
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects closure when another update wins the race', async () => {
+      txMock.clubRegistrationWindow.updateMany.mockResolvedValue({
+        count: 0,
+      } as never);
+
+      await expect(
+        service.closeRegistrationWindow(clubId, windowId),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.findUniqueOrThrow,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Registration window protection', () => {
+    const dates = {
+      opensAt: '2099-03-01T00:00:00.000Z',
+      closesAt: '2099-03-15T00:00:00.000Z',
+    };
+
+    it('rejects overlapping registration windows', async () => {
+      await expect(
+        service.createRegistrationWindow(clubId, dates),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.create,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects editing a price-locked window', async () => {
+      txMock.clubRegistrationWindow.findFirst.mockResolvedValue({
+        ...activeWindow(),
+        opensAt: new Date('2099-01-01T00:00:00.000Z'),
+        closesAt: new Date('2099-02-01T00:00:00.000Z'),
+        effectiveFeeVersionId: 'locked-fee-version',
+      } as never);
+
+      await expect(
+        service.updateRegistrationWindow(
+          clubId,
+          windowId,
+          dates,
+        ),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubRegistrationWindow.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('rejects changing registration mode using an outdated version', async () => {
+      await expect(
+        service.updateMembershipMode(clubId, {
+          registrationMode: 'ALWAYS_OPEN',
+          configVersion: 999,
+        }),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubMembershipSettings.updateMany,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Membership fee protection', () => {
+    it('rejects fee updates using an outdated configuration version', async () => {
+      await expect(
+        service.updateMembershipFees(
+          clubId,
+          {
+            firstTimeFee: '40.00',
+            renewalFee: '25.00',
+            configVersion: 999,
+          },
+          'deanship-account',
+        ),
+      ).rejects.toThrow();
+
+      expect(
+        txMock.clubMembershipSettings.updateMany,
+      ).not.toHaveBeenCalled();
+
+      expect(
+        txMock.clubMembershipFeeVersion.create,
+      ).not.toHaveBeenCalled();
+    });
+  });
+});

@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-
+import { UpdateMembershipFeesDto } from './dto/update-membership-fees.dto';
 import {
   Prisma,
   AccountStatus,
@@ -13,6 +13,10 @@ import {
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { CreateClubDto } from './dto/create-club.dto';
 import { UpdateClubDto } from './dto/update-club.dto';
+import {
+  RegistrationWindowDatesDto,
+  UpdateMembershipModeDto,
+} from './dto/manage-registration-window.dto';
 
 @Injectable()
 export class ClubsService {
@@ -326,6 +330,22 @@ async findOneForDeanship(id: string) {
       id,
     },
     include: {
+      membershipSettings: true,
+
+membershipFeeVersions: {
+  orderBy: {
+    effectiveAt: 'desc',
+  },
+},
+
+registrationWindows: {
+  orderBy: {
+    opensAt: 'desc',
+  },
+  include: {
+    effectiveFeeVersion: true,
+  },
+},
       faculty: {
         select: {
           id: true,
@@ -690,6 +710,548 @@ if (membership.registrationMode === 'ALWAYS_OPEN') {
 
   throw error;
 }
+}
+async updateMembershipFees(
+  clubId: string,
+  dto: UpdateMembershipFeesDto,
+  actorId: string,
+) {
+  const firstTimeFee = new Prisma.Decimal(dto.firstTimeFee);
+  const renewalFee = new Prisma.Decimal(dto.renewalFee);
+
+  if (
+    !firstTimeFee.isFinite() ||
+    !renewalFee.isFinite() ||
+    firstTimeFee.lte(0) ||
+    renewalFee.lte(0) ||
+    firstTimeFee.decimalPlaces() > 2 ||
+    renewalFee.decimalPlaces() > 2 ||
+    firstTimeFee.gt('99999999.99') ||
+    renewalFee.gt('99999999.99')
+  ) {
+    throw new BadRequestException(
+      'Membership fees must be positive amounts with at most two decimal places.',
+    );
+  }
+
+  return this.prisma.$transaction(async (tx) => {
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: { id: true, status: true },
+    });
+
+    if (!club) {
+      throw new NotFoundException('Club not found.');
+    }
+
+    if (club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Membership fees cannot be changed for an archived club.',
+      );
+    }
+
+    const settings = await tx.clubMembershipSettings.findUnique({
+      where: { clubId },
+    });
+
+    if (!settings) {
+      throw new ConflictException(
+        'This club has no membership configuration.',
+      );
+    }
+
+    if (settings.configVersion !== dto.configVersion) {
+      throw new ConflictException(
+        'Membership settings changed. Reload the page before saving.',
+      );
+    }
+
+    const unchanged =
+      settings.pendingFirstTimeFee.equals(firstTimeFee) &&
+      settings.pendingRenewalFee.equals(renewalFee);
+
+    if (unchanged) {
+      return {
+        message: 'Membership fees are already up to date.',
+        settings,
+      };
+    }
+
+    const now = new Date();
+
+    if (settings.registrationMode === 'WINDOWED') {
+      const activeWindow = await tx.clubRegistrationWindow.findFirst({
+        where: {
+          clubId,
+          opensAt: { lte: now },
+          closesAt: { gt: now },
+          closedAt: null,
+        },
+        select: { id: true },
+      });
+
+      if (activeWindow) {
+        throw new ConflictException(
+          'Fees cannot be changed while a registration window is active.',
+        );
+      }
+    }
+
+    // Optimistic concurrency protection: another administrator
+    // cannot silently overwrite a newer configuration.
+    const updated = await tx.clubMembershipSettings.updateMany({
+      where: {
+        clubId,
+        configVersion: dto.configVersion,
+      },
+      data: {
+        pendingFirstTimeFee: firstTimeFee,
+        pendingRenewalFee: renewalFee,
+        configVersion: { increment: 1 },
+      },
+    });
+
+    if (updated.count !== 1) {
+      throw new ConflictException(
+        'Membership settings changed. Reload before saving.',
+      );
+    }
+
+    // Always-open clubs have no future window activation event.
+    // Publish a new immutable effective fee version immediately.
+    if (settings.registrationMode === 'ALWAYS_OPEN') {
+      await tx.clubMembershipFeeVersion.create({
+        data: {
+          clubId,
+          firstTimeFee,
+          renewalFee,
+          currency: settings.currency,
+          effectiveAt: now,
+          createdById: actorId,
+        },
+      });
+    }
+
+    // Windowed clubs only update their pending settings.
+    // The window activation logic in Sprint 5.D will
+    // create and lock the effective fee version.
+    return {
+      message:
+        settings.registrationMode === 'ALWAYS_OPEN'
+          ? 'Membership fees updated and effective immediately.'
+          : 'Future membership fees saved.',
+      settings: await tx.clubMembershipSettings.findUniqueOrThrow({
+        where: { clubId },
+      }),
+    };
+  });
+}
+async updateMembershipMode(
+  clubId: string,
+  dto: UpdateMembershipModeDto,
+) {
+  return this.prisma.$transaction(async (tx) => {
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: { id: true, status: true },
+    });
+
+    if (!club) {
+      throw new NotFoundException('Club not found.');
+    }
+
+    if (club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Archived clubs cannot change registration settings.',
+      );
+    }
+
+    const settings = await tx.clubMembershipSettings.findUnique({
+      where: { clubId },
+    });
+
+    if (!settings) {
+      throw new ConflictException(
+        'Membership configuration is missing.',
+      );
+    }
+
+    if (settings.configVersion !== dto.configVersion) {
+      throw new ConflictException(
+        'Configuration changed. Reload before saving.',
+      );
+    }
+
+    if (settings.registrationMode === dto.registrationMode) {
+      return settings;
+    }
+
+    const now = new Date();
+
+    if (dto.registrationMode === 'ALWAYS_OPEN') {
+      const existingWindow =
+        await tx.clubRegistrationWindow.findFirst({
+          where: {
+            clubId,
+            closesAt: { gt: now },
+            OR: [
+              { closedAt: null },
+              { closedAt: { gt: now } },
+            ],
+          },
+          select: { id: true },
+        });
+
+      if (existingWindow) {
+        throw new ConflictException(
+          'Cannot enable Always Open while active or future windows exist.',
+        );
+      }
+    }
+
+    const updated =
+      await tx.clubMembershipSettings.updateMany({
+        where: {
+          clubId,
+          configVersion: dto.configVersion,
+        },
+        data: {
+          registrationMode: dto.registrationMode,
+          configVersion: { increment: 1 },
+        },
+      });
+
+    if (updated.count !== 1) {
+      throw new ConflictException(
+        'Configuration changed. Reload before saving.',
+      );
+    }
+
+    if (dto.registrationMode === 'ALWAYS_OPEN') {
+      await tx.clubMembershipFeeVersion.create({
+        data: {
+          clubId,
+          firstTimeFee: settings.pendingFirstTimeFee,
+          renewalFee: settings.pendingRenewalFee,
+          currency: settings.currency,
+          effectiveAt: now,
+        },
+      });
+    }
+
+    return tx.clubMembershipSettings.findUniqueOrThrow({
+      where: { clubId },
+    });
+  });
+}
+private validateRegistrationWindowDates(
+  dto: RegistrationWindowDatesDto,
+) {
+  const opensAt = new Date(dto.opensAt);
+  const closesAt = new Date(dto.closesAt);
+  const now = new Date();
+
+  if (
+    !Number.isFinite(opensAt.getTime()) ||
+    !Number.isFinite(closesAt.getTime())
+  ) {
+    throw new BadRequestException(
+      'Invalid registration dates.',
+    );
+  }
+
+  if (opensAt <= now) {
+    throw new BadRequestException(
+      'Registration must start in the future.',
+    );
+  }
+
+  if (closesAt <= opensAt) {
+    throw new BadRequestException(
+      'Closing date must be after opening date.',
+    );
+  }
+
+  return { opensAt, closesAt };
+}
+async createRegistrationWindow(
+  clubId: string,
+  dto: RegistrationWindowDatesDto,
+) {
+  const { opensAt, closesAt } =
+    this.validateRegistrationWindowDates(dto);
+
+  return this.prisma.$transaction(async (tx) => {
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: { id: true, status: true },
+    });
+
+    if (!club) {
+      throw new NotFoundException('Club not found.');
+    }
+
+    if (club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Cannot schedule registration for an archived club.',
+      );
+    }
+
+    const settings =
+      await tx.clubMembershipSettings.findUnique({
+        where: { clubId },
+      });
+
+    if (!settings) {
+      throw new ConflictException(
+        'Membership configuration is missing.',
+      );
+    }
+
+    if (settings.registrationMode !== 'WINDOWED') {
+      throw new ConflictException(
+        'Switch the club to Scheduled Registration first.',
+      );
+    }
+
+    const overlapping =
+      await tx.clubRegistrationWindow.findFirst({
+        where: {
+          clubId,
+          opensAt: { lt: closesAt },
+          closesAt: { gt: opensAt },
+          OR: [
+            { closedAt: null },
+            { closedAt: { gt: opensAt } },
+          ],
+        },
+        select: { id: true },
+      });
+
+    if (overlapping) {
+      throw new ConflictException(
+        'This registration period overlaps an existing window.',
+      );
+    }
+
+    return tx.clubRegistrationWindow.create({
+      data: {
+        clubId,
+        opensAt,
+        closesAt,
+      },
+    });
+  });
+}
+async closeRegistrationWindow(
+  clubId: string,
+  windowId: string,
+) {
+  return this.prisma.$transaction(async (tx) => {
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!club) {
+      throw new NotFoundException('Club not found.');
+    }
+
+    if (club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Registration cannot be closed for an archived club.',
+      );
+    }
+
+    const settings =
+      await tx.clubMembershipSettings.findUnique({
+        where: { clubId },
+      });
+
+    if (!settings) {
+      throw new ConflictException(
+        'Membership configuration is missing.',
+      );
+    }
+
+    if (settings.registrationMode !== 'WINDOWED') {
+      throw new ConflictException(
+        'The club is not using scheduled registration.',
+      );
+    }
+
+    const existing =
+      await tx.clubRegistrationWindow.findFirst({
+        where: {
+          id: windowId,
+          clubId,
+        },
+      });
+
+    if (!existing) {
+      throw new NotFoundException(
+        'Registration window not found.',
+      );
+    }
+
+    const now = new Date();
+
+    // Early closure is allowed only while the window is active.
+    if (existing.opensAt > now) {
+      throw new ConflictException(
+        'A future registration window cannot be closed early.',
+      );
+    }
+
+    if (existing.closesAt <= now) {
+      throw new ConflictException(
+        'This registration window has already expired.',
+      );
+    }
+
+    if (existing.closedAt !== null) {
+      throw new ConflictException(
+        'This registration window is already closed.',
+      );
+    }
+
+    // Conditional update protects against another administrator
+    // closing the window between our read and write.
+    const updated =
+      await tx.clubRegistrationWindow.updateMany({
+        where: {
+          id: windowId,
+          clubId,
+          opensAt: { lte: now },
+          closesAt: { gt: now },
+          closedAt: null,
+        },
+        data: {
+          closedAt: now,
+        },
+      });
+
+    if (updated.count !== 1) {
+      throw new ConflictException(
+        'Registration window changed. Reload before closing.',
+      );
+    }
+
+    return tx.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+  });
+}
+async updateRegistrationWindow(
+  clubId: string,
+  windowId: string,
+  dto: RegistrationWindowDatesDto,
+) {
+  const { opensAt, closesAt } =
+    this.validateRegistrationWindowDates(dto);
+
+  return this.prisma.$transaction(async (tx) => {
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: { id: true, status: true },
+    });
+
+    if (!club) {
+      throw new NotFoundException('Club not found.');
+    }
+
+    if (club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Archived clubs cannot modify registration windows.',
+      );
+    }
+
+    const settings =
+      await tx.clubMembershipSettings.findUnique({
+        where: { clubId },
+      });
+
+    if (settings?.registrationMode !== 'WINDOWED') {
+      throw new ConflictException(
+        'Registration must be in Scheduled mode.',
+      );
+    }
+
+    const existing =
+      await tx.clubRegistrationWindow.findFirst({
+        where: {
+          id: windowId,
+          clubId,
+        },
+      });
+
+    if (!existing) {
+      throw new NotFoundException(
+        'Registration window not found.',
+      );
+    }
+
+    const now = new Date();
+
+    if (
+      existing.opensAt <= now ||
+      existing.closedAt !== null ||
+      existing.effectiveFeeVersionId !== null
+    ) {
+      throw new ConflictException(
+        'Only future, unlocked registration windows can be edited.',
+      );
+    }
+
+    const overlapping =
+      await tx.clubRegistrationWindow.findFirst({
+        where: {
+          clubId,
+          id: { not: windowId },
+          opensAt: { lt: closesAt },
+          closesAt: { gt: opensAt },
+          OR: [
+            { closedAt: null },
+            { closedAt: { gt: opensAt } },
+          ],
+        },
+        select: { id: true },
+      });
+
+    if (overlapping) {
+      throw new ConflictException(
+        'The updated dates overlap another registration window.',
+      );
+    }
+
+    const result =
+      await tx.clubRegistrationWindow.updateMany({
+        where: {
+          id: windowId,
+          clubId,
+          opensAt: { gt: now },
+          closedAt: null,
+          effectiveFeeVersionId: null,
+        },
+        data: {
+          opensAt,
+          closesAt,
+        },
+      });
+
+    if (result.count !== 1) {
+      throw new ConflictException(
+        'Registration window changed. Reload before editing.',
+      );
+    }
+
+    return tx.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+  });
 }
 async update(id: string, dto: UpdateClubDto) {
   const existing = await this.prisma.club.findUnique({

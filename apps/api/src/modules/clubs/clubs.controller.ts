@@ -11,6 +11,11 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { AccountRole } from '../../generated/prisma/client';
+import { UpdateMembershipFeesDto } from './dto/update-membership-fees.dto';
+import {
+  RegistrationWindowDatesDto,
+  UpdateMembershipModeDto,
+} from './dto/manage-registration-window.dto';
 
 @Controller('clubs')
 export class ClubsController {
@@ -120,4 +125,65 @@ export class ClubsController {
   revokeClubAdmin(@Param('id', ParseUUIDPipe) clubId: string, @Param('assignmentId', ParseUUIDPipe) assignmentId: string, @Req() request: AuthenticatedRequest) {
     return this.clubAdminAssignmentsService.revokeAdmin(clubId, assignmentId, request.user.id);
   }
+
+  @Patch(':id/membership/fees')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+updateMembershipFees(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Body() dto: UpdateMembershipFeesDto,
+  @Req() request: AuthenticatedRequest,
+) {
+  return this.clubsService.updateMembershipFees(
+    clubId,
+    dto,
+    request.user.id,
+  );
+}
+@Patch(':id/membership/mode')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+updateMembershipMode(
+  @Param('id', ParseUUIDPipe) id: string,
+  @Body() dto: UpdateMembershipModeDto,
+) {
+  return this.clubsService.updateMembershipMode(id, dto);
+}
+
+@Post(':id/membership/windows')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+createRegistrationWindow(
+  @Param('id', ParseUUIDPipe) id: string,
+  @Body() dto: RegistrationWindowDatesDto,
+) {
+  return this.clubsService.createRegistrationWindow(id, dto);
+}
+
+@Patch(':id/membership/windows/:windowId')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+updateRegistrationWindow(
+  @Param('id', ParseUUIDPipe) id: string,
+  @Param('windowId', ParseUUIDPipe) windowId: string,
+  @Body() dto: RegistrationWindowDatesDto,
+) {
+  return this.clubsService.updateRegistrationWindow(
+    id,
+    windowId,
+    dto,
+  );
+}
+@Patch(':id/membership/windows/:windowId/close')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+closeRegistrationWindow(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Param('windowId', ParseUUIDPipe) windowId: string,
+) {
+  return this.clubsService.closeRegistrationWindow(
+    clubId,
+    windowId,
+  );
+}
 }

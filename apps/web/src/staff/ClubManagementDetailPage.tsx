@@ -52,6 +52,7 @@ registrationWindows?: {
   closesAt: string
   closedAt: string | null
   effectiveFeeVersionId: string | null
+  canceledAt: string | null
 }[]
 }
 
@@ -1144,9 +1145,9 @@ async function saveClubDetails() {
 
           <input
             type="number"
-            min="0.01"
+            min="0.00"
             max="99999999.99"
-            step="0.01"
+            step="5"
             value={firstTimeFee}
             disabled={savingFees || club.status !== 'ACTIVE'}
             onChange={(event) => {
@@ -1162,9 +1163,9 @@ async function saveClubDetails() {
 
           <input
             type="number"
-            min="0.01"
+            min="0.00"
             max="99999999.99"
-            step="0.01"
+            step="5"
             value={renewalFee}
             disabled={savingFees || club.status !== 'ACTIVE'}
             onChange={(event) => {
@@ -1378,24 +1379,30 @@ async function saveClubDetails() {
                   const opensAt = new Date(registrationWindow.opensAt)
                   const closesAt = new Date(registrationWindow.closesAt)
                   const canEdit =
-                    club.status === 'ACTIVE' &&
-                    club.membershipSettings?.registrationMode === 'WINDOWED' &&
-                    opensAt > now &&
-                    registrationWindow.closedAt === null &&
-                    registrationWindow.effectiveFeeVersionId === null
-                  const canClose =
-                    club.status === 'ACTIVE' &&
-                    club.membershipSettings?.registrationMode === 'WINDOWED' &&
-                    opensAt <= now &&
-                    closesAt > now &&
-                    registrationWindow.closedAt === null
-                  const status = registrationWindow.closedAt
-                    ? 'Closed early'
-                    : now < opensAt
-                      ? 'Scheduled'
-                      : now >= closesAt
-                        ? 'Closed'
-                        : 'Open'
+  club.status === 'ACTIVE' &&
+  club.membershipSettings?.registrationMode === 'WINDOWED' &&
+  opensAt > now &&
+  registrationWindow.closedAt === null &&
+  registrationWindow.canceledAt === null &&
+  registrationWindow.effectiveFeeVersionId === null
+
+const canClose =
+  club.status === 'ACTIVE' &&
+  club.membershipSettings?.registrationMode === 'WINDOWED' &&
+  opensAt <= now &&
+  closesAt > now &&
+  registrationWindow.closedAt === null &&
+  registrationWindow.canceledAt === null
+
+const status = registrationWindow.canceledAt
+  ? 'Canceled'
+  : registrationWindow.closedAt
+    ? 'Closed early'
+    : now < opensAt
+      ? 'Scheduled'
+      : now >= closesAt
+        ? 'Closed'
+        : 'Open'
 
                   return (
                     <div

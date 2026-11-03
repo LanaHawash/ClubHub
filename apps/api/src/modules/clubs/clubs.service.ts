@@ -811,7 +811,8 @@ async activateRegistrationWindowFees(
     if (
       registrationWindow.opensAt > now ||
       registrationWindow.closesAt <= now ||
-      registrationWindow.closedAt !== null
+      registrationWindow.closedAt !== null ||
+      registrationWindow.canceledAt !== null
     ) {
       throw new ConflictException(
         'Registration window is not currently active.',
@@ -845,6 +846,7 @@ async activateRegistrationWindowFees(
         where: {
           id: windowId,
           clubId,
+          canceledAt: null,
           effectiveFeeVersionId: null,
           closedAt: null,
           opensAt: { lte: now },
@@ -1002,17 +1004,21 @@ private async resolveMembershipAvailabilityOnce(
       },
 
       registrationWindows: {
-        select: {
-          id: true,
-          opensAt: true,
-          closesAt: true,
-          closedAt: true,
-          effectiveFeeVersionId: true,
-        },
-        orderBy: {
-          opensAt: 'asc',
-        },
-      },
+  where: {
+    canceledAt: null,
+  },
+  select: {
+    id: true,
+    opensAt: true,
+    closesAt: true,
+    closedAt: true,
+    canceledAt: true,
+    effectiveFeeVersionId: true,
+  },
+  orderBy: {
+    opensAt: 'asc',
+  },
+},
     },
   });
 
@@ -1196,6 +1202,7 @@ const latestState = await this.prisma.club.findUnique({
         closesAt: true,
         closedAt: true,
         effectiveFeeVersionId: true,
+        canceledAt: true,
       },
     },
   },
@@ -1212,6 +1219,7 @@ if (
   latestWindow.opensAt > checkedAt ||
   latestWindow.closesAt <= checkedAt ||
   latestWindow.closedAt !== null ||
+  latestWindow.canceledAt !== null ||
   latestWindow.effectiveFeeVersionId !==
     resolvedWindow.effectiveFeeVersionId
 ) {
@@ -1515,15 +1523,27 @@ async updateMembershipMode(
       );
     }
 
-    const settings = await tx.clubMembershipSettings.findUnique({
-      where: { clubId },
-    });
+    // Lock settings before modifying any registration windows.
+    // This follows the locking order used by fee activation.
+    const lockedSettings = await tx.$queryRaw<
+      { id: string }[]
+    >`
+      SELECT "id"
+      FROM "ClubMembershipSettings"
+      WHERE "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
 
-    if (!settings) {
+    if (lockedSettings.length === 0) {
       throw new ConflictException(
         'Membership configuration is missing.',
       );
     }
+
+    const settings =
+      await tx.clubMembershipSettings.findUniqueOrThrow({
+        where: { clubId },
+      });
 
     if (settings.configVersion !== dto.configVersion) {
       throw new ConflictException(
@@ -1538,22 +1558,53 @@ async updateMembershipMode(
     const now = new Date();
 
     if (dto.registrationMode === 'ALWAYS_OPEN') {
-      const existingWindow =
+      // Cancel every future, unlocked registration window.
+      // Canceled windows remain in the database for audit history.
+      await tx.clubRegistrationWindow.updateMany({
+        where: {
+          clubId,
+          
+          opensAt: { gt: now },
+          canceledAt: null,
+          closedAt: null,
+          effectiveFeeVersionId: null,
+        },
+        data: {
+          canceledAt: now,
+        },
+      });
+
+      // End any currently active window.
+      // Historical fee snapshots remain immutable.
+      await tx.clubRegistrationWindow.updateMany({
+        where: {
+          clubId,
+          opensAt: { lte: now },
+          closesAt: { gt: now },
+          closedAt: null,
+          canceledAt: null,
+        },
+        data: {
+          closedAt: now,
+        },
+      });
+
+      // Detect windows that crossed their opening boundary
+      // or changed concurrently during the transition.
+      const remainingWindows =
         await tx.clubRegistrationWindow.findFirst({
           where: {
             clubId,
             closesAt: { gt: now },
-            OR: [
-              { closedAt: null },
-              { closedAt: { gt: now } },
-            ],
+            canceledAt: null,
+            closedAt: null,
           },
           select: { id: true },
         });
 
-      if (existingWindow) {
+      if (remainingWindows) {
         throw new ConflictException(
-          'Cannot enable Always Open while active or future windows exist.',
+          'Registration windows changed during the policy switch. Reload and retry.',
         );
       }
     }
@@ -1667,6 +1718,7 @@ async createRegistrationWindow(
       await tx.clubRegistrationWindow.findFirst({
         where: {
           clubId,
+          canceledAt: null,
           opensAt: { lt: closesAt },
           closesAt: { gt: opensAt },
           OR: [
@@ -1848,6 +1900,7 @@ async updateRegistrationWindow(
     if (
       existing.opensAt <= now ||
       existing.closedAt !== null ||
+      existing.canceledAt !== null ||
       existing.effectiveFeeVersionId !== null
     ) {
       throw new ConflictException(
@@ -1859,6 +1912,7 @@ async updateRegistrationWindow(
       await tx.clubRegistrationWindow.findFirst({
         where: {
           clubId,
+          canceledAt: null,
           id: { not: windowId },
           opensAt: { lt: closesAt },
           closesAt: { gt: opensAt },
@@ -1883,6 +1937,7 @@ async updateRegistrationWindow(
           clubId,
           opensAt: { gt: now },
           closedAt: null,
+          canceledAt: null,
           effectiveFeeVersionId: null,
         },
         data: {

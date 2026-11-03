@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Users, ShieldCheck } from 'lucide-react'
+import {
+  ArrowLeft,
+  Users,
+  ShieldCheck,
+  BadgeCheck,
+  Lock,
+} from 'lucide-react'
 import { clubTone, getClubInitials } from '../components/ClubCard'
 
 type ApiClub = {
@@ -20,8 +26,140 @@ type Leadership = {
   supervisor: string | null
 }
 
-type ClubPageProps = { clubId: string; onBack: () => void }
+type MembershipAvailabilityStatus =
+  | 'ALWAYS_OPEN'
+  | 'SCHEDULED'
+  | 'OPEN'
+  | 'CLOSED'
+  | 'CLOSED_EARLY'
+  | 'NOT_SCHEDULED'
+  | 'NOT_CONFIGURED'
+  | 'CLUB_ARCHIVED'
 
+type MembershipAvailability = {
+  registrationMode: 'ALWAYS_OPEN' | 'WINDOWED' | null
+  status: MembershipAvailabilityStatus
+  registrationAvailable: boolean
+  effectiveFees: {
+    firstTimeFee: string
+    renewalFee: string
+    currency: string
+    feeVersionId: string
+  } | null
+  window: {
+    id: string
+    opensAt: string
+    closesAt: string
+    closedAt: string | null
+  } | null
+}
+
+type StudentMembershipEligibility = {
+  eligible: boolean
+  reason:
+    | 'ELIGIBLE'
+    | 'FACULTY_NOT_ALLOWED'
+    | 'MAJOR_NOT_ALLOWED'
+    | 'INVALID_CLUB_CONFIGURATION'
+    | 'CLUB_ARCHIVED'
+
+  membership: {
+    registrationAvailable: boolean
+    availabilityStatus: MembershipAvailabilityStatus
+    alreadyActiveMember: boolean
+    activeMembershipExpiresAt: string | null
+    hasPreviousMembership: boolean
+    canApply: boolean
+    feeType: 'FIRST_TIME' | 'RENEWAL' | null
+    amount: string | null
+    currency: string | null
+    feeVersionId: string | null
+  }
+}
+
+type ClubPageProps = {
+  clubId: string
+  onBack: () => void
+  accessToken: string | null
+  onSignIn: () => void
+}
+
+function formatMembershipDate(value: string) {
+  return new Date(value).toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+function formatMembershipPrice(
+  amount: string,
+  currency: string
+) {
+  const formattedAmount = Number(amount).toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })
+
+  return `${formattedAmount} ${currency}`
+}
+
+function eligibilityExplanation(
+  reason: StudentMembershipEligibility['reason']
+): string {
+  switch (reason) {
+    case 'ELIGIBLE':
+      return "You're eligible to join this club."
+
+    case 'FACULTY_NOT_ALLOWED':
+      return 'Your faculty does not meet this club’s eligibility requirements.'
+
+    case 'MAJOR_NOT_ALLOWED':
+      return 'Your major does not meet this club’s eligibility requirements.'
+
+    case 'CLUB_ARCHIVED':
+      return 'This club is not currently accepting memberships.'
+
+    case 'INVALID_CLUB_CONFIGURATION':
+      return 'This club’s eligibility configuration needs to be reviewed.'
+  }
+}
+
+function registrationWindowMessage(
+  availability: MembershipAvailability
+): string | null {
+  switch (availability.status) {
+    case 'ALWAYS_OPEN':
+      return null
+
+    case 'OPEN':
+      return availability.window
+        ? `Registration is open until ${formatMembershipDate(
+            availability.window.closesAt
+          )}.`
+        : 'Registration is open.'
+
+    case 'SCHEDULED':
+      return availability.window
+        ? `Registration opens on ${formatMembershipDate(
+            availability.window.opensAt
+          )}.`
+        : 'Registration has been scheduled.'
+
+    case 'CLOSED':
+    case 'CLOSED_EARLY':
+      return 'Membership registration is currently closed.'
+
+    case 'NOT_SCHEDULED':
+      return 'Membership registration is not currently scheduled.'
+
+    case 'NOT_CONFIGURED':
+      return 'Membership registration is not yet configured.'
+
+    case 'CLUB_ARCHIVED':
+      return 'This club is not accepting memberships.'
+  }
+}
 function BoardAvatar({
   name,
   photo,
@@ -63,13 +201,104 @@ function BoardAvatar({
   )
 }
 
-export default function ClubPage({ clubId, onBack }: ClubPageProps) {
+export default function ClubPage({
+  clubId,
+  onBack,
+  accessToken,
+  onSignIn,
+}: ClubPageProps) {
   const [club, setClub] = useState<ApiClub | null>(null)
   const [leadership, setLeadership] = useState<Leadership | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [leadershipError, setLeadershipError] = useState(false)
+const [membershipAvailability, setMembershipAvailability] =
+  useState<MembershipAvailability | null>(null)
 
+const [membershipEligibility, setMembershipEligibility] =
+  useState<StudentMembershipEligibility | null>(null)
+
+const [membershipLoading, setMembershipLoading] =
+  useState(true)
+
+const [membershipError, setMembershipError] =
+  useState<string | null>(null)
+
+useEffect(() => {
+  const controller = new AbortController()
+
+  async function loadMembership() {
+    setMembershipLoading(true)
+    setMembershipError(null)
+    setMembershipAvailability(null)
+    setMembershipEligibility(null)
+
+    try {
+      const availabilityResponse = await fetch(
+        `/api/clubs/${clubId}/membership/availability`,
+        {
+          signal: controller.signal,
+          cache: 'no-store',
+        }
+      )
+
+      if (!availabilityResponse.ok) {
+        throw new Error(
+          'Membership information is temporarily unavailable.'
+        )
+      }
+
+      const availability: MembershipAvailability =
+        await availabilityResponse.json()
+
+      if (accessToken) {
+        const eligibilityResponse = await fetch(
+          `/api/clubs/${clubId}/eligibility/me`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+            signal: controller.signal,
+            cache: 'no-store',
+          }
+        )
+
+        if (!eligibilityResponse.ok) {
+          throw new Error(
+            'We could not check your membership eligibility.'
+          )
+        }
+
+        const eligibility: StudentMembershipEligibility =
+          await eligibilityResponse.json()
+
+        if (!controller.signal.aborted) {
+          setMembershipEligibility(eligibility)
+        }
+      }
+
+      if (!controller.signal.aborted) {
+        setMembershipAvailability(availability)
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setMembershipError(
+          error instanceof Error
+            ? error.message
+            : 'Membership information is unavailable.'
+        )
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setMembershipLoading(false)
+      }
+    }
+  }
+
+  void loadMembership()
+
+  return () => controller.abort()
+}, [clubId, accessToken])
   useEffect(() => {
     const controller = new AbortController()
     async function loadClub() {
@@ -167,14 +396,237 @@ export default function ClubPage({ clubId, onBack }: ClubPageProps) {
           </section>
         </div>
         <aside className="lg:sticky lg:top-24 lg:self-start">
-          <div className="rounded-3xl bg-plum p-7 text-white shadow-xl">
-            <p className="font-mono text-xs uppercase tracking-[0.2em] text-butter">Membership</p>
-            <h2 className="mt-4 font-display text-4xl">Join this club</h2>
-            <p className="mt-4 text-sm text-white/70">Membership registration and renewal fees will appear here when available.</p>
-            <button disabled className="mt-6 w-full cursor-not-allowed rounded-full bg-butter px-6 py-3 font-semibold text-ink opacity-60">Apply to join</button>
-            {club.contactEmail && <a href={`mailto:${club.contactEmail}`} className="mt-3 block w-full rounded-full border border-white/30 px-6 py-3 text-center text-sm font-semibold hover:bg-white/10">Contact the club</a>}
-          </div>
-        </aside>
+  <div className="rounded-3xl bg-plum p-7 text-white shadow-xl">
+
+    <p className="font-mono text-xs uppercase tracking-[0.2em] text-butter">
+      Membership
+    </p>
+
+    {membershipLoading ? (
+
+      <p className="mt-5 text-sm text-white/70" role="status">
+        Checking membership information...
+      </p>
+
+    ) : membershipError || !membershipAvailability ? (
+
+      <p className="mt-5 text-sm text-rose-soft" role="alert">
+        {membershipError ??
+          'Membership information is currently unavailable.'}
+      </p>
+
+    ) : membershipEligibility?.membership.alreadyActiveMember ? (
+
+      <>
+        <p className="mt-3 flex items-center gap-2 font-display text-4xl">
+          <BadgeCheck className="text-mint" />
+          You're a member
+        </p>
+
+        {membershipEligibility.membership.activeMembershipExpiresAt && (
+          <p className="mt-3 text-sm text-white/70">
+            Active until{' '}
+            {formatMembershipDate(
+              membershipEligibility.membership.activeMembershipExpiresAt
+            )}
+          </p>
+        )}
+
+        <p className="mt-5 text-sm text-white/70">
+          Your membership is currently active.
+        </p>
+      </>
+
+    ) : (
+
+      <>
+        {(() => {
+          const eligibility = membershipEligibility
+
+          const membership = eligibility?.membership
+
+          const isStudent = accessToken !== null
+
+          const isEligible = eligibility?.eligible === true
+
+          const registrationOpen =
+            membershipAvailability.registrationAvailable
+
+          const isReturning =
+            membership?.hasPreviousMembership === true
+
+          const personalizedPrice =
+            membership?.amount ?? null
+
+          const personalizedCurrency =
+            membership?.currency ?? null
+
+          const publicFees =
+            membershipAvailability.effectiveFees
+
+          const displayPrice = isStudent
+            ? personalizedPrice
+            : publicFees?.firstTimeFee ?? null
+
+          const displayCurrency = isStudent
+            ? personalizedCurrency
+            : publicFees?.currency ?? null
+
+          const windowMessage =
+            registrationWindowMessage(membershipAvailability)
+
+          const canApply =
+            membership?.canApply === true
+
+          return (
+            <>
+              {displayPrice !== null &&
+                displayCurrency !== null && (
+
+                <div className="mt-4 flex items-end gap-3">
+                  <p className="font-display text-7xl leading-none">
+                    {formatMembershipPrice(
+                      displayPrice,
+                      displayCurrency
+                    )}
+                  </p>
+
+                  <p className="pb-2 text-sm text-white/70">
+                    {isStudent
+                      ? membership?.feeType === 'RENEWAL'
+                        ? 'renewal fee'
+                        : 'first-time fee'
+                      : 'first-time'}
+                  </p>
+                </div>
+
+              )}
+
+              {!isStudent && publicFees && (
+
+                <p className="mt-1 text-sm text-white/60">
+                  Renewal{' '}
+                  {formatMembershipPrice(
+                    publicFees.renewalFee,
+                    publicFees.currency
+                  )}
+                </p>
+
+              )}
+
+              {!displayPrice && (
+                <h2 className="mt-4 font-display text-4xl">
+                  Join this club
+                </h2>
+              )}
+
+              {isReturning && (
+                <p className="mt-1 text-sm text-mint">
+                  Welcome back. You've been a member before.
+                </p>
+              )}
+
+              {windowMessage && (
+
+                <p
+                  className={`mt-5 rounded-xl p-3 text-sm ${
+                    registrationOpen
+                      ? 'bg-mint/15 text-mint'
+                      : 'bg-butter/15 text-butter'
+                  }`}
+                >
+                  {windowMessage}
+                </p>
+
+              )}
+
+              {isStudent && eligibility && (
+
+                <p
+                  className={`mt-5 flex items-start gap-2 rounded-xl p-3 text-sm ${
+                    isEligible
+                      ? 'bg-mint/15 text-mint'
+                      : 'bg-rose/15 text-rose-soft'
+                  }`}
+                >
+
+                  {isEligible ? (
+                    <BadgeCheck
+                      size={18}
+                      className="mt-0.5 shrink-0"
+                    />
+                  ) : (
+                    <Lock
+                      size={18}
+                      className="mt-0.5 shrink-0"
+                    />
+                  )}
+
+                  <span>
+                    {eligibilityExplanation(eligibility.reason)}
+                  </span>
+
+                </p>
+
+              )}
+
+              {!isStudent ? (
+
+                <button
+                  type="button"
+                  onClick={onSignIn}
+                  className="mt-6 w-full rounded-full bg-butter px-6 py-3 font-semibold text-ink transition hover:opacity-90"
+                >
+                  Sign in to join
+                </button>
+
+              ) : (
+
+                <button
+                  type="button"
+                  disabled
+                  aria-disabled="true"
+                  title={
+                    canApply
+                      ? 'Membership applications will be available in the next sprint.'
+                      : !isEligible
+                        ? 'You do not meet this club’s eligibility requirements.'
+                        : !registrationOpen
+                          ? 'Membership registration is not currently open.'
+                          : 'Membership applications are not available yet.'
+                  }
+                  className="mt-6 w-full cursor-not-allowed rounded-full bg-butter px-6 py-3 font-semibold text-ink opacity-60"
+                >
+                  {isReturning
+                    ? 'Renew membership'
+                    : 'Apply to join'}
+                </button>
+
+              )}
+            </>
+          )
+        })()}
+      </>
+
+    )}
+
+    {club.contactEmail && (
+
+      <a
+        href={`mailto:${club.contactEmail}`}
+        className="mt-3 block w-full rounded-full border border-white/30 px-6 py-3 text-center text-sm font-semibold transition hover:bg-white/10"
+      >
+        Contact the club
+      </a>
+
+    )}
+
+    <p className="mt-5 text-center text-xs text-white/50">
+      Valid for one year from the day you join
+    </p>
+
+  </div>
+</aside>
       </div>
     </div>
   )

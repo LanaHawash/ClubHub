@@ -28,8 +28,9 @@ export class MembershipWindowReconcilerService
       const clubs = await this.prisma.$queryRaw<{ clubId: string }[]>`
         SELECT DISTINCT "clubId"
         FROM "ClubRegistrationWindow"
-        WHERE "opensAt" <= clock_timestamp()
-          AND "effectiveFeeVersionId" IS NULL
+WHERE "opensAt" <= clock_timestamp()
+  AND "effectiveFeeVersionId" IS NULL
+  AND "canceledAt" IS NULL
       `;
       for (const { clubId } of clubs) {
         try {

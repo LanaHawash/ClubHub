@@ -452,7 +452,7 @@ model ClubRegistrationWindow {
   closesAt DateTime @db.Timestamptz(6)
 
   closedAt DateTime? @db.Timestamptz(6)
-
+  canceledAt DateTime? @db.Timestamptz(6)
   effectiveFeeVersionId String? @db.Uuid
 
   effectiveFeeVersion ClubMembershipFeeVersion? @relation(fields: [effectiveFeeVersionId, clubId], references: [id, clubId], onDelete: Restrict)

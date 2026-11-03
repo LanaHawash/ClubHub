@@ -54,6 +54,7 @@ clubMembershipFeeVersion: {
       opensAt: Date;
       closesAt: Date;
       closedAt: Date | null;
+      canceledAt?: Date | null;
       effectiveFeeVersionId: string | null;
     }> = [],
     status: 'ACTIVE' | 'ARCHIVED' = 'ACTIVE',
@@ -71,18 +72,21 @@ clubMembershipFeeVersion: {
     opensAt: Date,
     closesAt: Date,
     closedAt: Date | null = null,
+    canceledAt: Date | null = null,
   ) => ({
     id,
     opensAt,
     closesAt,
     closedAt,
+    canceledAt:null,
     effectiveFeeVersionId: null,
   });
-  function latestOpenState(window: {
+ function latestOpenState(window: {
   id: string;
   opensAt: Date;
   closesAt: Date;
   closedAt: Date | null;
+  canceledAt?: Date | null;
   effectiveFeeVersionId: string | null;
 }) {
   return {
@@ -90,9 +94,15 @@ clubMembershipFeeVersion: {
     membershipSettings: {
       registrationMode: 'WINDOWED',
     },
-    registrationWindows: [window],
+    registrationWindows: [
+      {
+        ...window,
+        canceledAt: window.canceledAt ?? null,
+      },
+    ],
   };
 }
+ 
 
 beforeEach(() => {
   jest.clearAllMocks();

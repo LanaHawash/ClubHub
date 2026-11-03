@@ -12,6 +12,7 @@ describe('ClubsService - Sprint 5 Membership Creation', () => {
   };
 
   const txMock = {
+
     club: {
       create: jest.fn(),
     },
@@ -99,6 +100,7 @@ describe('ClubsService - Sprint 5 Membership Creation', () => {
     txMock.clubRegistrationWindow.create.mockResolvedValue(
       {} as never,
     );
+
   });
 
   it('creates settings and an effective fee version for an always-open club', async () => {
@@ -289,6 +291,8 @@ describe('ClubsService - Sprint 5.C Membership Management', () => {
   });
 
   const txMock = {
+     $queryRaw: jest.fn(),
+
     club: {
       findUnique: jest.fn(),
     },
@@ -367,6 +371,13 @@ describe('ClubsService - Sprint 5.C Membership Management', () => {
     txMock.clubMembershipFeeVersion.create.mockResolvedValue(
       {} as never,
     );
+    txMock.$queryRaw
+  .mockResolvedValueOnce(
+    [{ id: 'locked-settings' }] as never,
+  )
+  .mockResolvedValueOnce(
+    [{ now: new Date() }] as never,
+  );
   });
 
   describe('Early registration closure', () => {

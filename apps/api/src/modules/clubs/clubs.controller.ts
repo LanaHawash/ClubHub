@@ -12,6 +12,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { AccountRole } from '../../generated/prisma/client';
 import { UpdateMembershipFeesDto } from './dto/update-membership-fees.dto';
+import { InitializeMembershipDto } from './dto/initialize-membership.dto';
 import {
   RegistrationWindowDatesDto,
   UpdateMembershipModeDto,
@@ -79,10 +80,21 @@ export class ClubsController {
   @Get(':id/eligibility/me')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.STUDENT)
-  getMyEligibility(@Param('id', ParseUUIDPipe) clubId: string, @Req() request: AuthenticatedRequest) {
-    return this.eligibilityService.evaluateForAccount(request.user.id, clubId);
+  async getMyEligibility(@Param('id', ParseUUIDPipe) clubId: string, @Req() request: AuthenticatedRequest) {
+    const eligibility = await this.eligibilityService.evaluateForAccount(request.user.id, clubId);
+    const membership = await this.clubsService.getMembershipQuoteForAccount(
+      request.user.id, clubId, eligibility.eligible,
+    );
+    return { ...eligibility, membership };
   }
-
+@Get(':id/membership/availability')
+getMembershipAvailability(
+  @Param('id', ParseUUIDPipe) clubId: string,
+) {
+  return this.clubsService.getMembershipAvailability(
+    clubId,
+  );
+}
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.clubsService.findOne(id);
@@ -124,6 +136,17 @@ export class ClubsController {
   @Roles(AccountRole.DEANSHIP)
   revokeClubAdmin(@Param('id', ParseUUIDPipe) clubId: string, @Param('assignmentId', ParseUUIDPipe) assignmentId: string, @Req() request: AuthenticatedRequest) {
     return this.clubAdminAssignmentsService.revokeAdmin(clubId, assignmentId, request.user.id);
+  }
+
+  @Post(':id/membership/initialize')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  initializeMembership(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Body() dto: InitializeMembershipDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.clubsService.initializeMembership(clubId, dto, request.user.id);
   }
 
   @Patch(':id/membership/fees')

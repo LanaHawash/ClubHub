@@ -211,50 +211,6 @@ async function refreshMembershipClub() {
 
   setClub(updated)
 }
-async function saveRegistrationMode() {
-  if (!club?.membershipSettings || savingMode) return
-
-  setWindowError('')
-  setWindowSuccess('')
-  setSavingMode(true)
-
-  try {
-    const response = await fetch(
-      `/api/clubs/${club.id}/membership/mode`,
-      {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          registrationMode,
-          configVersion: club.membershipSettings.configVersion,
-        }),
-      },
-    )
-
-    if (!response.ok) {
-      const body: { message?: string | string[] } =
-        await response.json().catch(() => ({}))
-
-      throw new Error(
-        Array.isArray(body.message)
-          ? body.message.join(' ')
-          : body.message || 'Unable to change registration mode.',
-      )
-    }
-
-    await refreshMembershipClub()
-    setWindowSuccess('Registration mode updated.')
-  } catch (error) {
-    setWindowError(
-      error instanceof Error ? error.message : 'Unable to save mode.',
-    )
-  } finally {
-    setSavingMode(false)
-  }
-}
 async function closeRegistrationWindow(windowId: string) {
   if (!club || closingWindowId) return
 
@@ -316,74 +272,74 @@ async function closeRegistrationWindow(windowId: string) {
     setClosingWindowId(null)
   }
 }
-async function saveRegistrationWindow() {
-  if (!club || savingWindow) return
-
+async function saveWindowConfiguration() {
+  if (!club?.membershipSettings || savingWindow || savingMode) return
   setWindowError('')
   setWindowSuccess('')
 
-  if (!windowStart || !windowEnd) {
-    setWindowError('Select both opening and closing dates.')
-    return
-  }
+  const settings = club.membershipSettings
+  const switchingMode = registrationMode !== settings.registrationMode
+  const needsWindow = registrationMode === 'WINDOWED' &&
+    (switchingMode || Boolean(editingWindowId) ||
+      (!editingWindowId && Boolean(windowStart || windowEnd)))
 
-  const opensAt = new Date(`${windowStart}T00:00:00`)
-  const closesAt = new Date(`${windowEnd}T00:00:00`)
-
-  if (
-    !Number.isFinite(opensAt.getTime()) ||
-    !Number.isFinite(closesAt.getTime()) ||
-    opensAt <= new Date() ||
-    closesAt <= opensAt
-  ) {
-    setWindowError('Choose a valid future registration period.')
-    return
-  }
-
-  setSavingWindow(true)
-
-  try {
-    const endpoint = editingWindowId
-      ? `/api/clubs/${club.id}/membership/windows/${editingWindowId}`
-      : `/api/clubs/${club.id}/membership/windows`
-
-    const response = await fetch(endpoint, {
-      method: editingWindowId ? 'PATCH' : 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({
-        opensAt: opensAt.toISOString(),
-        closesAt: closesAt.toISOString(),
-      }),
-    })
-
-    if (!response.ok) {
-      const body: { message?: string | string[] } =
-        await response.json().catch(() => ({}))
-
-      throw new Error(
-        Array.isArray(body.message)
-          ? body.message.join(' ')
-          : body.message || 'Unable to save registration window.',
-      )
+  if (registrationMode === 'WINDOWED' && needsWindow) {
+    if (!windowStart || !windowEnd) {
+      setWindowError('Select both opening and closing dates.')
+      return
     }
+    const opensAt = new Date(`${windowStart}T00:00:00`)
+    // Figma date selection is inclusive; backend closes at the next midnight.
+    const closesAt = new Date(new Date(`${windowEnd}T00:00:00`).getTime() + 86_400_000)
+    if (!Number.isFinite(opensAt.getTime()) || !Number.isFinite(closesAt.getTime()) ||
+        opensAt <= new Date() || closesAt <= opensAt) {
+      setWindowError('Choose a valid future registration period.')
+      return
+    }
+  }
 
+  setSavingMode(true)
+  setSavingWindow(true)
+  try {
+    const readError = async (response: Response) => {
+      const body: { message?: string | string[] } = await response.json().catch(() => ({}))
+      return Array.isArray(body.message) ? body.message.join(' ') :
+        body.message || `Unable to save registration (${response.status}).`
+    }
+    if (switchingMode) {
+      const response = await fetch(`/api/clubs/${club.id}/membership/mode`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ registrationMode, configVersion: settings.configVersion }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+    }
+    if (needsWindow) {
+      const opensAt = new Date(`${windowStart}T00:00:00`)
+      const closesAt = new Date(new Date(`${windowEnd}T00:00:00`).getTime() + 86_400_000)
+      const response = await fetch(
+        editingWindowId
+          ? `/api/clubs/${club.id}/membership/windows/${editingWindowId}`
+          : `/api/clubs/${club.id}/membership/windows`,
+        {
+          method: editingWindowId ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+          body: JSON.stringify({ opensAt: opensAt.toISOString(), closesAt: closesAt.toISOString() }),
+        },
+      )
+      if (!response.ok) throw new Error(await readError(response))
+    }
     await refreshMembershipClub()
-
+    setEditingWindowId(null)
     setWindowStart('')
     setWindowEnd('')
-    setEditingWindowId(null)
-
-    setWindowSuccess('Registration window saved.')
+    setWindowSuccess('Registration settings saved.')
   } catch (error) {
-    setWindowError(
-      error instanceof Error
-        ? error.message
-        : 'Unable to save registration window.',
-    )
+    // Refresh even after a partial save (mode may have succeeded before the window failed).
+    try { await refreshMembershipClub() } catch { /* Keep the original error visible. */ }
+    setWindowError(error instanceof Error ? error.message : 'Unable to save registration settings.')
   } finally {
+    setSavingMode(false)
     setSavingWindow(false)
   }
 }
@@ -507,7 +463,7 @@ useEffect(() => {
   return () => controller.abort()
 }, [accessToken])
 async function saveMembershipFees() {
-  if (!club?.membershipSettings || savingFees) return
+  if (!club || savingFees) return
 
   setFeesError('')
   setFeesSuccess('')
@@ -530,9 +486,11 @@ async function saveMembershipFees() {
 
   try {
     const response = await fetch(
-      `/api/clubs/${club.id}/membership/fees`,
+      club.membershipSettings
+        ? `/api/clubs/${club.id}/membership/fees`
+        : `/api/clubs/${club.id}/membership/initialize`,
       {
-        method: 'PATCH',
+        method: club.membershipSettings ? 'PATCH' : 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
@@ -540,7 +498,7 @@ async function saveMembershipFees() {
         body: JSON.stringify({
           firstTimeFee,
           renewalFee,
-          configVersion: club.membershipSettings.configVersion,
+          ...(club.membershipSettings ? { configVersion: club.membershipSettings.configVersion } : {}),
         }),
       },
     )
@@ -576,7 +534,9 @@ async function saveMembershipFees() {
     setRenewalFee(updated.membershipSettings?.pendingRenewalFee ?? '')
 
     setFeesSuccess(
-      updated.membershipSettings?.registrationMode === 'ALWAYS_OPEN'
+      !club.membershipSettings
+        ? 'Membership configured. Registration window controls are now available.'
+        : updated.membershipSettings?.registrationMode === 'ALWAYS_OPEN'
         ? 'Membership fees updated and effective immediately.'
         : 'Future membership fees saved.',
     )
@@ -1171,12 +1131,13 @@ async function saveClubDetails() {
       <section className="rounded-3xl border border-ink/10 bg-card p-6">
   <h2 className="font-display text-3xl">Membership fees</h2>
 
-  {!club.membershipSettings ? (
+  {!club.membershipSettings && (
     <p className="mt-4 text-sm text-ink-2">
-      Membership fees have not been configured for this club.
+      Enter this club's actual membership fees to enable registration settings.
+      Registration will start in Any time mode; you can choose Set a window afterward.
     </p>
-  ) : (
-    <>
+  )}
+  <>
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <label className="block text-sm font-semibold">
           First-time members (ILS)
@@ -1216,7 +1177,9 @@ async function saveClubDetails() {
       </div>
 
       <p className="mt-4 text-xs text-ink-2">
-        {club.membershipSettings.registrationMode === 'ALWAYS_OPEN'
+        {!club.membershipSettings
+          ? 'Save the initial fees to configure membership for this existing club.'
+          : club.membershipSettings.registrationMode === 'ALWAYS_OPEN'
           ? 'Changes to these fees take effect immediately. Previous prices remain in history.'
           : 'Changes are saved for future registration windows. Prices already locked to a window remain unchanged.'}
       </p>
@@ -1269,17 +1232,16 @@ async function saveClubDetails() {
             savingFees ||
             club.status !== 'ACTIVE' ||
             (
-              firstTimeFee === club.membershipSettings.pendingFirstTimeFee &&
-              renewalFee === club.membershipSettings.pendingRenewalFee
+              firstTimeFee === club.membershipSettings?.pendingFirstTimeFee &&
+              renewalFee === club.membershipSettings?.pendingRenewalFee
             )
           }
           className="rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:opacity-40"
         >
-          {savingFees ? 'Saving...' : 'Save fees'}
+          {savingFees ? 'Saving...' : club.membershipSettings ? 'Save fees' : 'Configure membership'}
         </button>
       </div>
     </>
-  )}
 </section>
 
       {/* Original Figma AudiencePicker: full-width and editable with Sprint 3 API. */}
@@ -1342,116 +1304,70 @@ async function saveClubDetails() {
         </button>
       </section>
 
-      {/* Sprint 5.C: Manage scheduled registration and early closure. */}
-      <section className="lg:col-span-2 rounded-3xl border border-ink/10 bg-card p-6">
+      {/* Figma WindowPanel visual structure; existing Sprint 5 membership APIs stay connected. */}
+      <section className="lg:col-span-2 rounded-3xl border border-ink/10 bg-card p-6 sm:p-8">
         <h2 className="font-display text-3xl">Membership registration window</h2>
-
-        {!club.membershipSettings ? (
-          <p className="mt-4 text-sm text-ink-2">
-            Membership registration has not been configured.
-          </p>
-        ) : (
-          <>
-            <div className="mt-5 flex flex-wrap items-center gap-3">
-              <label className="text-sm font-semibold" htmlFor="membership-registration-mode">
-                Registration mode
-              </label>
-              <select
-                id="membership-registration-mode"
-                value={registrationMode}
-                disabled={savingMode || club.status !== 'ACTIVE'}
-                onChange={(event) => {
-                  setRegistrationMode(event.target.value as 'ALWAYS_OPEN' | 'WINDOWED')
+        <div className="mt-5">
+          <div className="inline-flex rounded-full border border-ink/15 p-0.5 text-sm font-semibold" role="group" aria-label="Registration window mode">
+            {([['Any time', 'ALWAYS_OPEN'], ['Set a window', 'WINDOWED']] as const).map(([label, mode]) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={registrationMode === mode}
+                disabled={club.status !== 'ACTIVE' || savingMode || !club.membershipSettings}
+                onClick={() => {
+                  setRegistrationMode(mode)
                   setWindowError('')
                   setWindowSuccess('')
                 }}
-                className="rounded-xl border border-ink/20 bg-paper px-4 py-3"
+                className={`rounded-full px-4 py-1.5 transition disabled:opacity-50 ${registrationMode === mode ? 'bg-ink text-paper' : 'text-ink-2'}`}
               >
-                <option value="ALWAYS_OPEN">Always open</option>
-                <option value="WINDOWED">Scheduled registration</option>
-              </select>
-              <button
-                type="button"
-                onClick={() => void saveRegistrationMode()}
-                disabled={
-                  savingMode ||
-                  club.status !== 'ACTIVE' ||
-                  registrationMode === club.membershipSettings.registrationMode
-                }
-                className="rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:opacity-40"
-              >
-                {savingMode ? 'Saving...' : 'Save mode'}
+                {label}
               </button>
+            ))}
+          </div>
+          {registrationMode === 'WINDOWED' ? (
+            <div className="mt-3 grid max-w-md gap-4 sm:grid-cols-2">
+              <label className="block text-sm font-semibold">
+                Opens
+                <input type="date" value={windowStart}
+                  onChange={(event) => setWindowStart(event.target.value)}
+                  disabled={club.status !== 'ACTIVE' || savingWindow || !club.membershipSettings}
+                  className="mt-2 block w-full rounded-xl border border-ink/20 bg-white px-4 py-3 font-normal" />
+              </label>
+              <label className="block text-sm font-semibold">
+                Closes
+                <input type="date" value={windowEnd} min={windowStart}
+                  onChange={(event) => setWindowEnd(event.target.value)}
+                  disabled={club.status !== 'ACTIVE' || savingWindow || !club.membershipSettings}
+                  className="mt-2 block w-full rounded-xl border border-ink/20 bg-white px-4 py-3 font-normal" />
+              </label>
             </div>
-
-            {club.membershipSettings.registrationMode === 'ALWAYS_OPEN' && (
-              <p className="mt-4 rounded-xl bg-paper p-4 text-sm text-ink-2">
-                This club is currently configured for always-open registration.
-                Existing registration-window history is preserved below.
-              </p>
-            )}
-
-            {club.membershipSettings.registrationMode === 'WINDOWED' && (
-              <div className="mt-6 rounded-2xl border border-ink/10 bg-paper p-4">
-                <h3 className="font-semibold">
-                  {editingWindowId
-                    ? 'Edit upcoming registration window'
-                    : 'Schedule new registration window'}
-                </h3>
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <label className="text-sm font-semibold">
-                    Opens
-                    <input
-                      type="date"
-                      value={windowStart}
-                      onChange={(event) => setWindowStart(event.target.value)}
-                      disabled={savingWindow || club.status !== 'ACTIVE'}
-                      className="mt-2 block w-full rounded-xl border border-ink/20 bg-card px-4 py-3"
-                    />
-                  </label>
-                  <label className="text-sm font-semibold">
-                    Closes (exclusive)
-                    <input
-                      type="date"
-                      min={windowStart}
-                      value={windowEnd}
-                      onChange={(event) => setWindowEnd(event.target.value)}
-                      disabled={savingWindow || club.status !== 'ACTIVE'}
-                      className="mt-2 block w-full rounded-xl border border-ink/20 bg-card px-4 py-3"
-                    />
-                  </label>
-                </div>
-                <p className="mt-2 text-xs text-ink-2">
-                  The closing date is exclusive: registration ends at the start of that day.
-                </p>
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void saveRegistrationWindow()}
-                    disabled={savingWindow || club.status !== 'ACTIVE'}
-                    className="rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:opacity-40"
-                  >
-                    {savingWindow ? 'Saving...' : editingWindowId ? 'Save changes' : 'Schedule window'}
-                  </button>
-                  {editingWindowId && (
-                    <button
-                      type="button"
-                      disabled={savingWindow}
-                      onClick={() => {
-                        setEditingWindowId(null)
-                        setWindowStart('')
-                        setWindowEnd('')
-                        setWindowError('')
-                      }}
-                      className="rounded-full border border-ink/20 px-5 py-2.5 text-sm font-semibold disabled:opacity-40"
-                    >
-                      Cancel
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
+          ) : (
+            <p className="mt-3 text-sm text-ink-2">Students can join or renew whenever they like.</p>
+          )}
+        </div>
+        {club.membershipSettings === null || club.membershipSettings === undefined ? (
+          <p role="status" className="mt-4 text-sm text-ink-2">
+            Membership settings are missing for this club. Saving is unavailable until they are configured.
+          </p>
+        ) : null}
+        {windowError && <p role="alert" className="mt-4 text-sm text-rose">{windowError}</p>}
+        {windowSuccess && <p role="status" className="mt-4 text-sm text-ink-2">{windowSuccess}</p>}
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-ink/10 pt-4">
+          <p className="max-w-md text-xs text-ink-2">
+            Applies to joining and renewing. Each membership lasts one year from the day it is paid.
+          </p>
+          <button type="button" onClick={() => void saveWindowConfiguration()}
+            disabled={club.status !== 'ACTIVE' || !club.membershipSettings || savingMode || savingWindow ||
+              (registrationMode === club.membershipSettings.registrationMode && !editingWindowId &&
+                (registrationMode === 'ALWAYS_OPEN' || (!windowStart && !windowEnd)))}
+            className="rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:cursor-not-allowed disabled:bg-ink/40">
+            {savingWindow || savingMode ? 'Saving...' : 'Save window'}
+          </button>
+        </div>
+        {/* Existing scheduling history and lifecycle controls are retained below the Figma editor. */}
+        {club.membershipSettings && (
             <div className="mt-6 space-y-3">
               <h3 className="font-semibold">Registration periods</h3>
               {!club.registrationWindows?.length ? (
@@ -1496,7 +1412,7 @@ async function saveClubDetails() {
                               onClick={() => {
                                 setEditingWindowId(registrationWindow.id)
                                 setWindowStart(opensAt.toLocaleDateString('sv-SE'))
-                                setWindowEnd(closesAt.toLocaleDateString('sv-SE'))
+                                setWindowEnd(new Date(closesAt.getTime() - 86_400_000).toLocaleDateString('sv-SE'))
                                 setWindowError('')
                                 setWindowSuccess('')
                               }}
@@ -1540,17 +1456,6 @@ async function saveClubDetails() {
                 })
               )}
             </div>
-            {windowError && (
-              <p role="alert" className="mt-4 text-sm text-rose">{windowError}</p>
-            )}
-            {windowSuccess && (
-              <p role="status" className="mt-4 text-sm text-ink-2">{windowSuccess}</p>
-            )}
-            <p className="mt-5 border-t border-ink/10 pt-4 text-xs text-ink-2">
-              Early closure is irreversible. Student registration enforcement and
-              automatic fee locking will be connected in later features.
-            </p>
-          </>
         )}
       </section>
 

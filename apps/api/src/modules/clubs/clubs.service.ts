@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { UpdateMembershipFeesDto } from './dto/update-membership-fees.dto';
+import { InitializeMembershipDto } from './dto/initialize-membership.dto';
 import {
   Prisma,
   AccountStatus,
@@ -17,7 +18,10 @@ import {
   RegistrationWindowDatesDto,
   UpdateMembershipModeDto,
 } from './dto/manage-registration-window.dto';
-
+import type {
+  EffectiveMembershipFees,
+  MembershipAvailabilityResult,
+} from './membership-availability.types';
 @Injectable()
 export class ClubsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -322,7 +326,7 @@ async findAllForDeanship(
 
     return club;
   }
-  
+
 // Deanship only: retrieve a club regardless of its status.
 async findOneForDeanship(id: string) {
   const club = await this.prisma.club.findUnique({
@@ -552,12 +556,6 @@ if (membership.registrationMode === 'WINDOWED') {
           },
         },
       });
-      const membership = dto.membership;
-          if (!membership) {
-      throw new BadRequestException(
-        'Membership configuration is required.',
-      );
-    }
     const firstTimeFee = new Prisma.Decimal(membership.firstTimeFee);
     const renewalFee = new Prisma.Decimal(membership.renewalFee);
 
@@ -711,6 +709,641 @@ if (membership.registrationMode === 'ALWAYS_OPEN') {
   throw error;
 }
 }
+async activateRegistrationWindowFees(
+  clubId: string,
+  windowId: string,
+) {
+  return this.prisma.$transaction(async (tx) => {
+    /*
+     * Lock the membership settings row first.
+     *
+     * This serializes fee activation requests for the same club
+     * and provides a consistent locking order.
+     */
+    const settingsLock = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubMembershipSettings"
+      WHERE "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
+
+    if (settingsLock.length === 0) {
+      throw new ConflictException(
+        'Membership configuration is missing.',
+      );
+    }
+
+    /*
+     * Lock the registration window itself.
+     *
+     * Concurrent activation attempts must wait rather than
+     * creating separate fee versions.
+     */
+    const windowLock = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubRegistrationWindow"
+      WHERE "id" = ${windowId}::uuid
+        AND "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
+
+    if (windowLock.length === 0) {
+      throw new NotFoundException(
+        'Registration window not found.',
+      );
+    }
+
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!club || club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Membership registration is unavailable.',
+      );
+    }
+
+    const settings =
+      await tx.clubMembershipSettings.findUnique({
+        where: { clubId },
+      });
+
+    if (
+      !settings ||
+      settings.registrationMode !== 'WINDOWED'
+    ) {
+      throw new ConflictException(
+        'The club is not using scheduled registration.',
+      );
+    }
+
+    const registrationWindow =
+      await tx.clubRegistrationWindow.findFirst({
+        where: {
+          id: windowId,
+          clubId,
+        },
+      });
+
+    if (!registrationWindow) {
+      throw new NotFoundException(
+        'Registration window not found.',
+      );
+    }
+
+    /*
+     * A previously locked window is idempotent:
+     * return the existing immutable version.
+     */
+    if (registrationWindow.effectiveFeeVersionId) {
+      return registrationWindow;
+    }
+
+    const now = new Date();
+
+    /*
+     * Only active, unclosed windows may be activated.
+     */
+    if (
+      registrationWindow.opensAt > now ||
+      registrationWindow.closesAt <= now ||
+      registrationWindow.closedAt !== null
+    ) {
+      throw new ConflictException(
+        'Registration window is not currently active.',
+      );
+    }
+
+    /*
+     * Create one immutable effective fee snapshot.
+     *
+     * Its effective time is the scheduled opening time.
+     */
+    const feeVersion =
+      await tx.clubMembershipFeeVersion.create({
+        data: {
+          clubId,
+          firstTimeFee: settings.pendingFirstTimeFee,
+          renewalFee: settings.pendingRenewalFee,
+          currency: settings.currency,
+          effectiveAt: registrationWindow.opensAt,
+        },
+      });
+
+    /*
+     * Associate the new fee version with its window.
+     *
+     * If this update fails, Prisma rolls back the transaction,
+     * including the newly created fee version.
+     */
+    const updated =
+      await tx.clubRegistrationWindow.updateMany({
+        where: {
+          id: windowId,
+          clubId,
+          effectiveFeeVersionId: null,
+          closedAt: null,
+          opensAt: { lte: now },
+          closesAt: { gt: now },
+        },
+        data: {
+          effectiveFeeVersionId: feeVersion.id,
+        },
+      });
+
+    if (updated.count !== 1) {
+      throw new ConflictException(
+        'Registration window changed during activation.',
+      );
+    }
+
+    return tx.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+  });
+}
+private async getEffectiveMembershipFees(
+  feeVersionId: string,
+): Promise<EffectiveMembershipFees> {
+  const version =
+    await this.prisma.clubMembershipFeeVersion.findUnique({
+      where: {
+        id: feeVersionId,
+      },
+      select: {
+        id: true,
+        firstTimeFee: true,
+        renewalFee: true,
+        currency: true,
+        effectiveAt: true,
+      },
+    });
+
+  if (!version) {
+    throw new ConflictException(
+      'The effective membership fee version could not be found.',
+    );
+  }
+
+  return {
+    firstTimeFee: version.firstTimeFee.toFixed(2),
+    renewalFee: version.renewalFee.toFixed(2),
+    currency: version.currency,
+    feeVersionId: version.id,
+    effectiveAt: version.effectiveAt,
+  };
+}
+/** Sprint 5.E: derive pricing from the existing availability resolver and confirmed history. */
+async getMembershipQuoteForAccount(
+  accountId: string,
+  clubId: string,
+  academicallyEligible: boolean,
+) {
+  const account = await this.prisma.account.findUnique({
+    where: { id: accountId },
+    select: { universityStudentId: true },
+  });
+  if (!account?.universityStudentId) {
+    throw new NotFoundException('Student profile not found.');
+  }
+
+  const now = new Date();
+  const [anyConfirmedMembership, activeMembership, availability] =
+    await Promise.all([
+      this.prisma.membership.findFirst({
+        where: {
+          clubId,
+          studentId: account.universityStudentId,
+          activatedAt: { lte: now },
+        },
+        select: { id: true },
+      }),
+      this.prisma.membership.findFirst({
+        where: {
+          clubId,
+          studentId: account.universityStudentId,
+          activatedAt: { lte: now },
+          expiresAt: { gt: now },
+        },
+        select: { id: true, expiresAt: true },
+      }),
+      this.getMembershipAvailability(clubId),
+    ]);
+
+  const canApply = academicallyEligible &&
+    availability.registrationAvailable && !activeMembership;
+  const feeType = !canApply
+    ? null
+    : anyConfirmedMembership ? 'RENEWAL' as const : 'FIRST_TIME' as const;
+  const effectiveFees = availability.effectiveFees;
+
+  return {
+    registrationAvailable: availability.registrationAvailable,
+    availabilityStatus: availability.status,
+    alreadyActiveMember: Boolean(activeMembership),
+    activeMembershipExpiresAt: activeMembership?.expiresAt ?? null,
+    hasPreviousMembership: Boolean(anyConfirmedMembership),
+    canApply,
+    feeType,
+    amount: feeType && effectiveFees
+      ? feeType === 'RENEWAL'
+        ? effectiveFees.renewalFee
+        : effectiveFees.firstTimeFee
+      : null,
+    currency: feeType ? (effectiveFees?.currency ?? null) : null,
+    feeVersionId: feeType ? (effectiveFees?.feeVersionId ?? null) : null,
+  };
+}
+async getMembershipAvailability(
+  clubId: string,
+): Promise<MembershipAvailabilityResult> {
+  try {
+    return await this.resolveMembershipAvailabilityOnce(
+      clubId,
+    );
+  } catch (error) {
+    /*
+     * A registration window may have closed,
+     * or a club may have been archived,
+     * between the initial availability read
+     * and fee activation.
+     *
+     * If activation encounters a conflict,
+     * retrieve the current availability again.
+     */
+    if (!(error instanceof ConflictException)) {
+      throw error;
+    }
+
+    return this.resolveMembershipAvailabilityOnce(
+      clubId,
+    );
+  }
+}
+private async resolveMembershipAvailabilityOnce(
+  clubId: string,
+): Promise<MembershipAvailabilityResult> {
+  const now = new Date();
+
+  const club = await this.prisma.club.findUnique({
+    where: { id: clubId },
+    select: {
+      id: true,
+      status: true,
+
+      membershipSettings: {
+        select: {
+          registrationMode: true,
+        },
+      },
+
+      registrationWindows: {
+        select: {
+          id: true,
+          opensAt: true,
+          closesAt: true,
+          closedAt: true,
+          effectiveFeeVersionId: true,
+        },
+        orderBy: {
+          opensAt: 'asc',
+        },
+      },
+    },
+  });
+
+  if (!club) {
+    throw new NotFoundException('Club not found.');
+  }
+
+  const registrationMode =
+    club.membershipSettings?.registrationMode ?? null;
+
+  const base = {
+    clubId: club.id,
+    registrationMode,
+    checkedAt: now,
+  };
+
+  if (club.status !== 'ACTIVE') {
+    return {
+      ...base,
+      status: 'CLUB_ARCHIVED',
+      registrationAvailable: false,
+      effectiveFees: null,
+      window: null,
+    };
+  }
+
+  if (!club.membershipSettings) {
+    return {
+      ...base,
+      status: 'NOT_CONFIGURED',
+      registrationAvailable: false,
+      effectiveFees: null,
+      window: null,
+    };
+  }
+
+if (registrationMode === 'ALWAYS_OPEN') {
+  const latestVersion =
+    await this.prisma.clubMembershipFeeVersion.findFirst({
+      where: {
+        clubId,
+        effectiveAt: {
+          lte: now,
+        },
+      },
+      orderBy: [
+        { effectiveAt: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+      select: {
+        id: true,
+      },
+    });
+
+  if (!latestVersion) {
+    throw new ConflictException(
+      'An effective membership fee version is missing for this club.',
+    );
+  }
+
+const effectiveFees =
+  await this.getEffectiveMembershipFees(
+    latestVersion.id,
+  );
+
+/*
+ * Sprint 5.D.5d.3 — ALWAYS_OPEN lifecycle validation.
+ *
+ * The club may have been archived while the effective
+ * membership fees were being retrieved.
+ *
+ * Recheck the authoritative club status and registration
+ * mode before reporting registration as available.
+ */
+const latestState = await this.prisma.club.findUnique({
+  where: {
+    id: clubId,
+  },
+  select: {
+    status: true,
+    membershipSettings: {
+      select: {
+        registrationMode: true,
+      },
+    },
+  },
+});
+
+if (
+  latestState?.status !== 'ACTIVE' ||
+  latestState.membershipSettings?.registrationMode !==
+    'ALWAYS_OPEN'
+) {
+  throw new ConflictException(
+    'Membership availability changed during resolution.',
+  );
+}
+
+return {
+  ...base,
+  checkedAt: new Date(),
+  status: 'ALWAYS_OPEN',
+  registrationAvailable: true,
+  effectiveFees,
+  window: null,
+};
+}
+
+  const windows = club.registrationWindows;
+
+  if (windows.length === 0) {
+    return {
+      ...base,
+      status: 'NOT_SCHEDULED',
+      registrationAvailable: false,
+      effectiveFees: null,
+      window: null,
+    };
+  }
+
+  // 1. Find a currently open registration window.
+  const activeWindow = windows.find(
+    (window) =>
+      window.opensAt <= now &&
+      window.closesAt > now &&
+      window.closedAt === null,
+  );
+
+if (activeWindow) {
+  let resolvedWindow = activeWindow;
+
+  if (!activeWindow.effectiveFeeVersionId) {
+    resolvedWindow =
+      await this.activateRegistrationWindowFees(
+        clubId,
+        activeWindow.id,
+      );
+  }
+
+  if (!resolvedWindow.effectiveFeeVersionId) {
+    throw new ConflictException(
+      'The registration window has no locked fee version.',
+    );
+  }
+
+  const effectiveFees =
+  await this.getEffectiveMembershipFees(
+    resolvedWindow.effectiveFeeVersionId,
+  );
+
+/*
+ * Final lifecycle validation.
+ *
+ * The initial availability query may be outdated by the time
+ * price activation and fee resolution finish.
+ *
+ * Recheck both the club and registration window before
+ * returning OPEN.
+ */
+const latestState = await this.prisma.club.findUnique({
+  where: {
+    id: clubId,
+  },
+  select: {
+    status: true,
+
+    membershipSettings: {
+      select: {
+        registrationMode: true,
+      },
+    },
+
+    registrationWindows: {
+      where: {
+        id: resolvedWindow.id,
+      },
+      select: {
+        id: true,
+        opensAt: true,
+        closesAt: true,
+        closedAt: true,
+        effectiveFeeVersionId: true,
+      },
+    },
+  },
+});
+
+const latestWindow = latestState?.registrationWindows?.[0];
+const checkedAt = new Date();
+
+if (
+  latestState?.status !== 'ACTIVE' ||
+  latestState.membershipSettings?.registrationMode !==
+    'WINDOWED' ||
+  !latestWindow ||
+  latestWindow.opensAt > checkedAt ||
+  latestWindow.closesAt <= checkedAt ||
+  latestWindow.closedAt !== null ||
+  latestWindow.effectiveFeeVersionId !==
+    resolvedWindow.effectiveFeeVersionId
+) {
+  throw new ConflictException(
+    'Registration availability changed during resolution.',
+  );
+}
+
+return {
+  ...base,
+  checkedAt,
+  status: 'OPEN',
+  registrationAvailable: true,
+  effectiveFees,
+  window: latestWindow,
+};
+}
+
+  // 2. Find the earliest upcoming registration window.
+  // Windows are ordered by opensAt ascending.
+  const upcomingWindow = windows.find(
+    (window) =>
+      window.opensAt > now &&
+      window.closedAt === null,
+  );
+
+  if (upcomingWindow) {
+    return {
+      ...base,
+      status: 'SCHEDULED',
+      registrationAvailable: false,
+      window: upcomingWindow,
+      effectiveFees: null,
+    };
+  }
+
+  // 3. No active or upcoming window exists.
+  // Return the most recently completed window.
+  const mostRecentWindow = [...windows].sort(
+    (a, b) =>
+      b.opensAt.getTime() - a.opensAt.getTime(),
+  )[0];
+
+  if (mostRecentWindow.closedAt !== null) {
+    return {
+      ...base,
+      status: 'CLOSED_EARLY',
+      registrationAvailable: false,
+      window: mostRecentWindow,
+      effectiveFees: null,
+    };
+  }
+
+  return {
+    ...base,
+    status: 'CLOSED',
+    registrationAvailable: false,
+    window: mostRecentWindow,
+    effectiveFees: null,
+  };
+}
+/** Configure membership fees for an existing club created before Sprint 5. */
+async initializeMembership(
+  clubId: string,
+  dto: InitializeMembershipDto,
+  actorId: string,
+) {
+  const firstTimeFee = new Prisma.Decimal(dto.firstTimeFee);
+  const renewalFee = new Prisma.Decimal(dto.renewalFee);
+  if (
+    !firstTimeFee.isFinite() || !renewalFee.isFinite() ||
+    firstTimeFee.lte(0) || renewalFee.lte(0) ||
+    firstTimeFee.decimalPlaces() > 2 || renewalFee.decimalPlaces() > 2 ||
+    firstTimeFee.gt('99999999.99') || renewalFee.gt('99999999.99')
+  ) {
+    throw new BadRequestException(
+      'Membership fees must be positive amounts with at most two decimal places.',
+    );
+  }
+
+  return this.prisma.$transaction(async (tx) => {
+    // A club-row lock serializes concurrent initializations even when the
+    // membership-settings row does not exist yet.
+    const locked = await tx.$queryRaw<{ id: string; status: string }[]>`
+      SELECT id, status FROM "Club" WHERE id = ${clubId}::uuid FOR UPDATE
+    `;
+    if (locked.length === 0) throw new NotFoundException('Club not found.');
+    if (locked[0].status !== 'ACTIVE') {
+      throw new ConflictException('Archived clubs cannot configure membership.');
+    }
+
+    const existing = await tx.clubMembershipSettings.findUnique({
+      where: { clubId }, select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException('Membership settings already exist. Reload the club.');
+    }
+    // Don't silently turn a partially migrated club's historical prices or
+    // windows into an unrelated always-open membership configuration.
+    const [oldVersions, oldWindows] = await Promise.all([
+      tx.clubMembershipFeeVersion.count({ where: { clubId } }),
+      tx.clubRegistrationWindow.count({ where: { clubId } }),
+    ]);
+    if (oldVersions || oldWindows) {
+      throw new ConflictException(
+        'This club has existing membership history. Review it before initialization.',
+      );
+    }
+
+    const settings = await tx.clubMembershipSettings.create({
+      data: {
+        clubId,
+        registrationMode: 'ALWAYS_OPEN',
+        pendingFirstTimeFee: firstTimeFee,
+        pendingRenewalFee: renewalFee,
+        currency: 'ILS',
+      },
+    });
+    await tx.clubMembershipFeeVersion.create({
+      data: {
+        clubId,
+        firstTimeFee,
+        renewalFee,
+        currency: 'ILS',
+        effectiveAt: new Date(),
+        createdById: actorId,
+      },
+    });
+    return { message: 'Membership configured.', settings };
+  });
+}
+
 async updateMembershipFees(
   clubId: string,
   dto: UpdateMembershipFeesDto,
@@ -735,6 +1368,21 @@ async updateMembershipFees(
   }
 
   return this.prisma.$transaction(async (tx) => {
+    // Use the same lock as registration-window activation.
+// All fee changes and activation attempts for this club
+// must serialize through its membership-settings row.
+const settingsLock = await tx.$queryRaw<{ id: string }[]>`
+  SELECT "id"
+  FROM "ClubMembershipSettings"
+  WHERE "clubId" = ${clubId}::uuid
+  FOR UPDATE
+`;
+
+if (settingsLock.length === 0) {
+  throw new ConflictException(
+    'This club has no membership configuration.',
+  );
+}
     const club = await tx.club.findUnique({
       where: { id: clubId },
       select: { id: true, status: true },
@@ -777,45 +1425,46 @@ async updateMembershipFees(
       };
     }
 
-    const now = new Date();
 
-    if (settings.registrationMode === 'WINDOWED') {
-      const activeWindow = await tx.clubRegistrationWindow.findFirst({
-        where: {
-          clubId,
-          opensAt: { lte: now },
-          closesAt: { gt: now },
-          closedAt: null,
-        },
-        select: { id: true },
-      });
 
-      if (activeWindow) {
-        throw new ConflictException(
-          'Fees cannot be changed while a registration window is active.',
-        );
-      }
-    }
+// Evaluate time after acquiring the membership-settings lock.
+// PostgreSQL supplies the timestamp used for this decision.
+const clockRows = await tx.$queryRaw<{ now: Date }[]>`
+  SELECT clock_timestamp() AS now
+`;
 
-    // Optimistic concurrency protection: another administrator
-    // cannot silently overwrite a newer configuration.
-    const updated = await tx.clubMembershipSettings.updateMany({
-      where: {
-        clubId,
-        configVersion: dto.configVersion,
-      },
-      data: {
-        pendingFirstTimeFee: firstTimeFee,
-        pendingRenewalFee: renewalFee,
-        configVersion: { increment: 1 },
-      },
-    });
+const now = clockRows[0].now;
 
-    if (updated.count !== 1) {
-      throw new ConflictException(
-        'Membership settings changed. Reload before saving.',
-      );
-    }
+
+
+
+/*
+ * Pending fee changes apply to future registration windows.
+ *
+ * IMPORTANT: Before this update is enabled in a running database,
+ * the database must be able to snapshot every already-opened window
+ * under the same membership-settings lock. That protection is
+ * provided by the separate Sprint 5.D.6 database migration.
+ *
+ * Current-window effective fee versions remain immutable.
+ */
+const updated = await tx.clubMembershipSettings.updateMany({
+  where: {
+    clubId,
+    configVersion: dto.configVersion,
+  },
+  data: {
+    pendingFirstTimeFee: firstTimeFee,
+    pendingRenewalFee: renewalFee,
+    configVersion: { increment: 1 },
+  },
+});
+
+if (updated.count !== 1) {
+  throw new ConflictException(
+    'Membership settings changed. Reload before saving.',
+  );
+}
 
     // Always-open clubs have no future window activation event.
     // Publish a new immutable effective fee version immediately.

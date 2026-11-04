@@ -5,6 +5,45 @@ import { PrismaService } from '../../shared/prisma/prisma.service';
 export class EventsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private archivedClubVisibility(today: Date) {
+    return {
+      OR: [
+        // Active clubs can display published events.
+        {
+          club: {
+            status: 'ACTIVE' as const,
+          },
+        },
+
+        // Archived clubs can display completed historical events.
+        {
+          AND: [
+            {
+              club: {
+                status: 'ARCHIVED' as const,
+              },
+            },
+            {
+              OR: [
+                {
+                  endDate: {
+                    lt: today,
+                  },
+                },
+                {
+                  endDate: null,
+                  startDate: {
+                    lt: today,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
   async findAll(period?: string) {
     const today = new Date().toISOString().slice(0, 10);
     const todayUtc = new Date(`${today}T00:00:00.000Z`);
@@ -19,7 +58,10 @@ export class EventsService {
     return this.prisma.event.findMany({
       where: {
         status: 'PUBLISHED',
+
         ...(dateFilter ? { startDate: dateFilter } : {}),
+
+        ...this.archivedClubVisibility(todayUtc),
       },
       include: {
         club: {
@@ -31,15 +73,22 @@ export class EventsService {
           },
         },
       },
-      orderBy: { startDate: 'desc' },
+      orderBy: {
+        startDate: 'desc',
+      },
     });
   }
 
   async findOne(id: string) {
+    const today = new Date().toISOString().slice(0, 10);
+    const todayUtc = new Date(`${today}T00:00:00.000Z`);
+
     const event = await this.prisma.event.findFirst({
       where: {
         id,
         status: 'PUBLISHED',
+
+        ...this.archivedClubVisibility(todayUtc),
       },
       include: {
         club: {

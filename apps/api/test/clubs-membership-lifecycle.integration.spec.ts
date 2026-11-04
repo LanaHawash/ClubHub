@@ -4,6 +4,9 @@ import { CreateClubDto } from '../src/modules/clubs/dto/create-club.dto';
 import { PrismaService } from '../src/shared/prisma/prisma.service';
 import { jest } from '@jest/globals';
 import { MembershipWindowReconcilerService } from '../src/modules/clubs/membership-window-reconciler.service';
+import { EventsService } from '../src/modules/events/events.service';
+import { BoardAppointmentsService } from '../src/modules/clubs/board-appointments.service';
+import { ClubEligibilityService } from '../src/modules/clubs/club-eligibility.service';
 /**
  * REAL PostgreSQL tests. Never run on clubhub_dev.
  * Uses unique immutable fixtures; does not try to delete protected windows/fee versions.
@@ -695,6 +698,326 @@ it('automatically recovers a missed window when the reconciler starts', async ()
     ).toBe(1);
   } finally {
     reconciler.onModuleDestroy();
+  }
+});
+it('enforces archived-club event visibility and restores it after reactivation', async () => {
+  const club = await service.create(dto('archived-event-visibility'));
+
+  const eventsService = new EventsService(prisma);
+
+  const day = 24 * 60 * 60 * 1000;
+
+  const today = new Date();
+  const todayUtc = new Date(
+    `${today.toISOString().slice(0, 10)}T00:00:00.000Z`,
+  );
+
+  const pastStart = new Date(todayUtc.getTime() - 10 * day);
+  const pastEnd = new Date(todayUtc.getTime() - 8 * day);
+
+  const ongoingStart = new Date(todayUtc.getTime() - day);
+  const ongoingEnd = new Date(todayUtc.getTime() + 3 * day);
+
+  const upcomingStart = new Date(todayUtc.getTime() + 5 * day);
+
+  const past = await prisma.event.create({
+    data: {
+      clubId: club.id,
+      title: `Past event ${run}`,
+      description: 'Historical event',
+      category: 'WORKSHOP',
+      status: 'PUBLISHED',
+      startDate: pastStart,
+      endDate: pastEnd,
+    },
+  });
+
+  const ongoing = await prisma.event.create({
+    data: {
+      clubId: club.id,
+      title: `Ongoing event ${run}`,
+      description: 'Ongoing event',
+      category: 'WORKSHOP',
+      status: 'PUBLISHED',
+      startDate: ongoingStart,
+      endDate: ongoingEnd,
+    },
+  });
+
+  const upcoming = await prisma.event.create({
+    data: {
+      clubId: club.id,
+      title: `Upcoming event ${run}`,
+      description: 'Future event',
+      category: 'WORKSHOP',
+      status: 'PUBLISHED',
+      startDate: upcomingStart,
+    },
+  });
+
+  // Before archiving, all published events are visible.
+
+  const beforeArchive = await eventsService.findAll();
+
+  expect(beforeArchive.some(event => event.id === past.id)).toBe(true);
+  expect(beforeArchive.some(event => event.id === ongoing.id)).toBe(true);
+  expect(beforeArchive.some(event => event.id === upcoming.id)).toBe(true);
+
+  // Archive the club through the actual service.
+
+  await service.archive(club.id);
+
+  // Public discovery must retain historical events only.
+
+  const afterArchive = await eventsService.findAll();
+
+  expect(afterArchive.some(event => event.id === past.id)).toBe(true);
+  expect(afterArchive.some(event => event.id === ongoing.id)).toBe(false);
+  expect(afterArchive.some(event => event.id === upcoming.id)).toBe(false);
+
+  // Direct access must follow the same visibility policy.
+
+  await expect(eventsService.findOne(past.id)).resolves.toMatchObject({
+    id: past.id,
+  });
+
+  await expect(eventsService.findOne(ongoing.id)).rejects.toThrow(
+    NotFoundException,
+  );
+
+  await expect(eventsService.findOne(upcoming.id)).rejects.toThrow(
+    NotFoundException,
+  );
+
+  // Reactivation restores visibility without recreating events.
+
+  await service.activate(club.id);
+
+  const afterReactivation = await eventsService.findAll();
+
+  expect(afterReactivation.some(event => event.id === past.id)).toBe(true);
+  expect(afterReactivation.some(event => event.id === ongoing.id)).toBe(true);
+  expect(afterReactivation.some(event => event.id === upcoming.id)).toBe(true);
+
+  // Confirm records were preserved throughout the lifecycle.
+
+  const persistedEvents = await prisma.event.findMany({
+    where: {
+      clubId: club.id,
+    },
+  });
+
+  expect(persistedEvents).toHaveLength(3);
+});
+it('prevents board appointment modifications for archived clubs', async () => {
+  const club = await service.create(dto('archived-board-protection'));
+
+  const boardService = new BoardAppointmentsService(
+    prisma,
+    new ClubEligibilityService(prisma),
+  );
+
+  // Create an isolated student fixture.
+  const faculty = await prisma.faculty.create({
+    data: {
+      name: `Board test faculty ${run}`,
+    },
+  });
+
+  const major = await prisma.major.create({
+    data: {
+      name: 'Board Test Major',
+      facultyId: faculty.id,
+    },
+  });
+
+  const student = await prisma.universityStudent.create({
+    data: {
+      universityId: `S5${Date.now().toString(36)}`,
+      email: `board-test-${run}@example.com`,
+      fullName: 'Board Test Student',
+      majorId: major.id,
+    },
+  });
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Establish an existing board appointment.
+  const appointment = await prisma.boardAppointment.create({
+    data: {
+      clubId: club.id,
+      studentId: student.id,
+      position: 'President',
+      startDate: new Date(`${today}T00:00:00.000Z`),
+    },
+  });
+
+  // Archive the club using the actual service.
+  await service.archive(club.id);
+
+  // 1. Creating a new appointment must fail.
+  await expect(
+    boardService.create(club.id, {
+      studentId: student.id,
+      position: 'Vice President',
+      startDate: today,
+    }),
+  ).rejects.toThrow(ConflictException);
+
+  // 2. Updating an existing appointment must fail.
+  await expect(
+    boardService.update(appointment.id, {
+      position: 'Vice President',
+    }),
+  ).rejects.toThrow(ConflictException);
+
+  // 3. Ending an existing appointment must fail.
+  await expect(
+    boardService.end(
+      appointment.id,
+      today,
+      '00000000-0000-4000-8000-000000000001',
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  // 4. Verify no additional appointments were created.
+  const appointments = await prisma.boardAppointment.findMany({
+    where: {
+      clubId: club.id,
+    },
+  });
+
+  expect(appointments).toHaveLength(1);
+
+  // 5. Verify the historical appointment was not modified.
+  const preserved = await prisma.boardAppointment.findUniqueOrThrow({
+    where: {
+      id: appointment.id,
+    },
+  });
+
+  expect(preserved.position).toBe('President');
+  expect(preserved.endedAt).toBeNull();
+
+  // 6. Deanship must still be able to access historical records.
+  const history = await boardService.history(club.id);
+
+  expect(
+    history.some(record => record.id === appointment.id),
+  ).toBe(true);
+});
+it('rejects board creation when a club is archived between validation and transaction', async () => {
+  const club = await service.create(dto('board-archive-race'));
+
+  const boardService = new BoardAppointmentsService(
+    prisma,
+    new ClubEligibilityService(prisma),
+  );
+
+  // Create an isolated eligible student.
+  const faculty = await prisma.faculty.create({
+    data: {
+      name: `Race test faculty ${run}`,
+    },
+  });
+
+  const major = await prisma.major.create({
+    data: {
+      name: 'Race Test Major',
+      facultyId: faculty.id,
+    },
+  });
+
+  const student = await prisma.universityStudent.create({
+    data: {
+      universityId: `R${Date.now().toString(36)}`,
+      email: `race-${run}@example.com`,
+      fullName: 'Race Test Student',
+      majorId: major.id,
+    },
+  });
+
+  await prisma.account.create({
+    data: {
+      email: student.email,
+      passwordHash: 'integration-test-only',
+      role: 'STUDENT',
+      status: 'ACTIVE',
+      universityStudentId: student.id,
+    },
+  });
+
+const initialValidationFinished = deferred();
+const continueCreation = deferred();
+
+// Pause after eligibility validation completes,
+// immediately before the database transaction begins.
+const target = boardService as unknown as {
+  assertEligible: (
+    accountId: string,
+    clubId: string
+  ) => Promise<void>;
+};
+
+const originalAssertEligible =
+  target.assertEligible.bind(boardService);
+
+const spy = jest
+  .spyOn(target, 'assertEligible')
+  .mockImplementation(async (accountId, clubId) => {
+    // Complete the real eligibility validation first.
+    await originalAssertEligible(accountId, clubId);
+
+    // Signal that all initial validations have passed.
+    initialValidationFinished.resolve();
+
+    // Hold execution immediately before the transaction.
+    await continueCreation.promise;
+  });
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+
+    const creationAttempt = boardService.create(club.id, {
+      studentId: student.id,
+      position: 'President',
+      startDate: today,
+    });
+
+    // Observe the request after initial validation.
+    await initialValidationFinished.promise;
+
+    // Archive the club before allowing creation to continue.
+    await service.archive(club.id);
+
+    // The appointment request continues with stale
+    // information from its first status check.
+    continueCreation.resolve();
+
+    // The transaction-level status check must reject it.
+    await expect(creationAttempt).rejects.toThrow(
+      ConflictException,
+    );
+
+    // Nothing should have been inserted.
+    const appointments = await prisma.boardAppointment.findMany({
+      where: {
+        clubId: club.id,
+      },
+    });
+
+    expect(appointments).toHaveLength(0);
+
+    const persistedClub = await prisma.club.findUniqueOrThrow({
+      where: {
+        id: club.id,
+      },
+    });
+
+    expect(persistedClub.status).toBe('ARCHIVED');
+  } finally {
+    continueCreation.resolve();
+    spy.mockRestore();
   }
 });
 });

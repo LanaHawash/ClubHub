@@ -65,8 +65,38 @@ export class BoardAppointmentsService {
     if (endDate && endDate < startDate) throw new BadRequestException('End date must be on or after start date.');
     const position = dto.position.trim();
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM "Club" WHERE id = ${clubId}::uuid FOR UPDATE`;
-      const others = await tx.boardAppointment.findMany({ where: { clubId }, select: { studentId: true, position: true, startDate: true, endDate: true, endedAt: true } });
+        // Lock the club before validating its lifecycle state.
+      // This prevents archiving from occurring between validation
+      // and appointment creation.
+      await tx.$queryRaw`
+        SELECT id FROM "Club"
+        WHERE id = ${clubId}::uuid
+        FOR UPDATE
+      `;
+
+      const club = await tx.club.findUnique({
+        where: { id: clubId },
+        select: { status: true },
+      });
+
+      if (!club || club.status !== 'ACTIVE') {
+        throw new ConflictException(
+          'Board appointments cannot be created for an archived club.',
+        );
+      }
+
+      const others = await tx.boardAppointment.findMany({
+        where: { clubId },
+        select: {
+          studentId: true,
+          position: true,
+          startDate: true,
+          endDate: true,
+          endedAt: true,
+        },
+      });
+
+
       for (const old of others) {
         // A manually ended term stops blocking new appointments from the
         // termination day onward. Date-only start fields represent a new
@@ -88,8 +118,28 @@ export class BoardAppointmentsService {
     return this.prisma.$transaction(async (tx) => {
       const old = await tx.boardAppointment.findUnique({ where: { id } });
       if (!old) throw new NotFoundException('Appointment not found.');
-      await tx.$queryRaw`SELECT id FROM "Club" WHERE id = ${old.clubId}::uuid FOR UPDATE`;
-      if (old.endedAt) throw new ConflictException('A manually ended appointment cannot be edited.');
+      await tx.$queryRaw`
+        SELECT id FROM "Club"
+        WHERE id = ${old.clubId}::uuid
+        FOR UPDATE
+      `;
+
+      const club = await tx.club.findUnique({
+        where: { id: old.clubId },
+        select: { status: true },
+      });
+
+      if (!club || club.status !== 'ACTIVE') {
+        throw new ConflictException(
+          'Board appointments cannot be modified for an archived club.',
+        );
+      }
+
+      if (old.endedAt) {
+        throw new ConflictException(
+          'A manually ended appointment cannot be edited.',
+        );
+      }
       const position = dto.position === undefined ? old.position : dto.position.trim();
       const startDate = dto.startDate ? this.parseDay(dto.startDate) : old.startDate;
       const endDate = dto.endDate ? this.parseDay(dto.endDate) : old.endDate;
@@ -117,7 +167,23 @@ export class BoardAppointmentsService {
     return this.prisma.$transaction(async (tx) => {
       const old = await tx.boardAppointment.findUnique({ where: { id } });
       if (!old) throw new NotFoundException('Appointment not found.');
-      await tx.$queryRaw`SELECT id FROM "Club" WHERE id = ${old.clubId}::uuid FOR UPDATE`;
+      await tx.$queryRaw`
+        SELECT id FROM "Club"
+        WHERE id = ${old.clubId}::uuid
+        FOR UPDATE
+      `;
+
+      const club = await tx.club.findUnique({
+        where: { id: old.clubId },
+        select: { status: true },
+      });
+
+      if (!club || club.status !== 'ACTIVE') {
+        throw new ConflictException(
+          'Board appointments cannot be ended for an archived club.',
+        );
+      }
+
       const now = new Date();
       const today = this.today();
       if (old.endedAt || old.startDate > today || (old.endDate && old.endDate < today)) throw new ConflictException('Appointment already ended or not yet active.');

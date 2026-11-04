@@ -11,6 +11,12 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { AccountRole } from '../../generated/prisma/client';
+import { UpdateMembershipFeesDto } from './dto/update-membership-fees.dto';
+import { InitializeMembershipDto } from './dto/initialize-membership.dto';
+import {
+  RegistrationWindowDatesDto,
+  UpdateMembershipModeDto,
+} from './dto/manage-registration-window.dto';
 
 @Controller('clubs')
 export class ClubsController {
@@ -74,10 +80,21 @@ export class ClubsController {
   @Get(':id/eligibility/me')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.STUDENT)
-  getMyEligibility(@Param('id', ParseUUIDPipe) clubId: string, @Req() request: AuthenticatedRequest) {
-    return this.eligibilityService.evaluateForAccount(request.user.id, clubId);
+  async getMyEligibility(@Param('id', ParseUUIDPipe) clubId: string, @Req() request: AuthenticatedRequest) {
+    const eligibility = await this.eligibilityService.evaluateForAccount(request.user.id, clubId);
+    const membership = await this.clubsService.getMembershipQuoteForAccount(
+      request.user.id, clubId, eligibility.eligible,
+    );
+    return { ...eligibility, membership };
   }
-
+@Get(':id/membership/availability')
+getMembershipAvailability(
+  @Param('id', ParseUUIDPipe) clubId: string,
+) {
+  return this.clubsService.getMembershipAvailability(
+    clubId,
+  );
+}
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.clubsService.findOne(id);
@@ -120,4 +137,76 @@ export class ClubsController {
   revokeClubAdmin(@Param('id', ParseUUIDPipe) clubId: string, @Param('assignmentId', ParseUUIDPipe) assignmentId: string, @Req() request: AuthenticatedRequest) {
     return this.clubAdminAssignmentsService.revokeAdmin(clubId, assignmentId, request.user.id);
   }
+
+  @Post(':id/membership/initialize')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  initializeMembership(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Body() dto: InitializeMembershipDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.clubsService.initializeMembership(clubId, dto, request.user.id);
+  }
+
+  @Patch(':id/membership/fees')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+updateMembershipFees(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Body() dto: UpdateMembershipFeesDto,
+  @Req() request: AuthenticatedRequest,
+) {
+  return this.clubsService.updateMembershipFees(
+    clubId,
+    dto,
+    request.user.id,
+  );
+}
+@Patch(':id/membership/mode')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+updateMembershipMode(
+  @Param('id', ParseUUIDPipe) id: string,
+  @Body() dto: UpdateMembershipModeDto,
+) {
+  return this.clubsService.updateMembershipMode(id, dto);
+}
+
+@Post(':id/membership/windows')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+createRegistrationWindow(
+  @Param('id', ParseUUIDPipe) id: string,
+  @Body() dto: RegistrationWindowDatesDto,
+) {
+  return this.clubsService.createRegistrationWindow(id, dto);
+}
+
+@Patch(':id/membership/windows/:windowId')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+updateRegistrationWindow(
+  @Param('id', ParseUUIDPipe) id: string,
+  @Param('windowId', ParseUUIDPipe) windowId: string,
+  @Body() dto: RegistrationWindowDatesDto,
+) {
+  return this.clubsService.updateRegistrationWindow(
+    id,
+    windowId,
+    dto,
+  );
+}
+@Patch(':id/membership/windows/:windowId/close')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.DEANSHIP)
+closeRegistrationWindow(
+  @Param('id', ParseUUIDPipe) clubId: string,
+  @Param('windowId', ParseUUIDPipe) windowId: string,
+) {
+  return this.clubsService.closeRegistrationWindow(
+    clubId,
+    windowId,
+  );
+}
 }

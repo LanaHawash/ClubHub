@@ -446,12 +446,18 @@ if (page === 'admin' || page === 'staff') {
           />
         ) : page === 'club' && selectedClubId ? (
           <ClubPage
-            clubId={selectedClubId}
-            onBack={() => {
-              setPage('clubs')
-              window.scrollTo(0, 0)
-            }}
-          />
+  clubId={selectedClubId}
+  accessToken={
+    session?.account.role === 'STUDENT'
+      ? session.accessToken
+      : null
+  }
+  onSignIn={() => setPage('signin')}
+  onBack={() => {
+    setPage('clubs')
+    window.scrollTo(0, 0)
+  }}
+/>
         ) : page === 'events' ? (
           <Events 
           isSignedIn={Boolean(session)} 

@@ -325,6 +325,43 @@ export default function ClubsManagementPage({
       setFormError('Select two different board members for administrator slots.')
       return
     }
+    if (!editingClubId) {
+  const validFee = (value: string) =>
+    /^(?:0|[1-9]\d{0,7})(?:\.\d{1,2})?$/.test(value) &&
+    Number(value) > 0
+
+  if (!validFee(firstFee) || !validFee(renewalFee)) {
+    setFormError(
+      'First-time and renewal fees must be positive amounts with at most two decimal places.'
+    )
+    return
+  }
+
+  if (windowEnabled) {
+    if (!windowStart || !windowEnd) {
+      setFormError(
+        'Choose both opening and closing dates.'
+      )
+      return
+    }
+
+    if (windowEnd < windowStart) {
+      setFormError(
+        'The closing date must not precede the opening date.'
+      )
+      return
+    }
+
+    const opening = new Date(`${windowStart}T00:00:00`)
+
+    if (opening <= new Date()) {
+      setFormError(
+        'The initial registration window must start in the future.'
+      )
+      return
+    }
+  }
+}
     setSaving(true)
     try {
       const response = await fetch(editingClubId ? `/api/clubs/${editingClubId}` : '/api/clubs', {
@@ -343,6 +380,20 @@ export default function ClubsManagementPage({
           facultyId: classification === 'FACULTY_BASED' ? facultyId : null,
           eligibleMajorIds: classification === 'MAJOR_BASED' ? selectedMajorIds : [],
           supervisorId: supervisorId || null,
+          ...(!editingClubId && {
+          membership: {
+            firstTimeFee: firstFee,
+            renewalFee,
+            currency: 'ILS',
+            registrationMode: windowEnabled ? 'WINDOWED' : 'ALWAYS_OPEN',
+            ...(windowEnabled && {
+              opensAt: new Date(`${windowStart}T00:00:00`).toISOString(),
+              closesAt: new Date(
+                new Date(`${windowEnd}T00:00:00`).getTime() + 24 * 60 * 60 * 1000
+              ).toISOString(),
+            }),
+          },
+        }),
           boardMembers: selectedBoard.map(({ studentId, role, startDate, endDate }) => ({
             studentId, position: role.trim(), startDate, ...(endDate ? { endDate } : {}),
           })),
@@ -594,7 +645,7 @@ const visibleClubs =
                 <div className="grid gap-4 sm:grid-cols-2">{[0, 1].map((slot) => <label key={slot} className="block"><span className="mb-1.5 block text-sm font-semibold">{slot === 0 ? 'Club administrator 1 · President' : 'Club administrator 2 · Second Administrator'}</span><select value={boardAdmins[slot]} onChange={(event) => setBoardAdmins((values) => values.map((value, index) => index === slot ? event.target.value : value))} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3"><option value="">Choose from the board…</option>{board.filter((member) => member.studentId && member.studentId !== boardAdmins[1 - slot]).map((member) => <option key={member.studentId} value={member.studentId}>{member.name} · {member.universityId} · {member.role}</option>)}</select></label>)}</div>
               </div>
               <div className="mt-4 max-w-sm"><label className="block"><span className="mb-1.5 block text-sm font-semibold">Club contact email</span><input type="email" required value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="name@clubs.uni.edu" className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><p className="mt-1 text-xs text-ink-2">A contact address for the club; administrator access uses individual student accounts.</p></div>
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">{[['First-time fee ($)', firstFee, setFirstFee], ['Renewal fee ($)', renewalFee, setRenewalFee]].map(([label, val, setter]) => <label key={label as string} className="block"><span className="mb-1.5 block text-sm font-semibold">{label as string}</span><input type="number" min="0" value={val as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label>)}</div>
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">{[['First-time fee ($)', firstFee, setFirstFee], ['Renewal fee ($)', renewalFee, setRenewalFee]].map(([label, val, setter]) => <label key={label as string} className="block"><span className="mb-1.5 block text-sm font-semibold">{label as string}</span><input type="number" min="0.01" step="0.01" value={val as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label>)}</div>
               <p className="mb-2 mt-6 text-sm font-semibold">Membership registration window<span className="font-normal text-ink-2">(optional)</span></p>
               <div className="inline-flex rounded-full border border-ink/15 p-0.5 text-sm font-semibold"><button type="button" aria-pressed={!windowEnabled} onClick={() => setWindowEnabled(false)} className={'rounded-full px-4 py-1.5 ' + (!windowEnabled ? 'bg-ink text-paper': 'text-ink-2')}>Any time</button><button type="button" aria-pressed={windowEnabled} onClick={() => setWindowEnabled(true)} className={'rounded-full px-4 py-1.5 ' + (windowEnabled ? 'bg-ink text-paper' : 'text-ink-2')}>Set a window</button></div>
               {windowEnabled && <div className="mt-3 grid max-w-md gap-4 sm:grid-cols-2"><label className="text-sm font-semibold">Opens<input type="date" value={windowStart} onChange={(e) => setWindowStart(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><label className="text-sm font-semibold">Closes<input type="date" value={windowEnd} onChange={(e) => setWindowEnd(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div>}
@@ -608,7 +659,10 @@ const visibleClubs =
               <ClubLabelsPicker value={clubLabels} onChange={setClubLabels} disabled={saving} />
               {formError && <p role="alert" className="mt-4 rounded-xl bg-rose-soft px-4 py-3 text-sm font-medium text-[#8a1f47]">{formError}</p>}
               <button type="submit" disabled={saving} className="mt-6 inline-flex items-center justify-center rounded-full bg-ink px-5 py-2.5 text-sm font-semibold text-paper disabled:opacity-40">{saving ? 'Saving...' : 'Create club'}</button>
-              <p className="mt-2 text-xs text-ink-2">Board appointments and administrator selections are saved with the club. Membership fees and registration windows are not yet persisted.</p>
+              <p className="mt-2 text-xs text-ink-2">
+                Club details, board appointments, administrator assignments,
+                membership fees, and registration settings are saved together.
+              </p>
             </form>
           </div>
         </div>, document.body

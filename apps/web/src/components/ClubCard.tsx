@@ -130,32 +130,82 @@ export function ClubCover({ club, className = '', big = false }: { club: ClubCar
   </div>
 }
 
-// A badge is shown ONLY when the account is known to be a signed-in student.
-// No fake membership or pending status: those await real membership APIs.
-export function useClubEligibility(clubs: Pick<Club, 'id'>[], accessToken: string | null | undefined) {
-  const [badges, setBadges] = useState<Record<string, ClubBadgeStatus>>({})
+export function useClubEligibility(
+  clubs: Pick<Club, 'id'>[],
+  accessToken: string | null | undefined
+) {
+  const [badgeResult, setBadgeResult] = useState<{
+    key: string
+    badges: Record<string, ClubBadgeStatus>
+  }>({
+    key: '',
+    badges: {},
+  })
+
   const clubIds = clubs.map(c => c.id).join(',')
+  const badgeKey = `${accessToken ?? ''}:${clubIds}`
+
   useEffect(() => {
-    setBadges({})
     if (!accessToken || !clubIds) return
+
     const controller = new AbortController()
+
     async function load() {
-      const entries = await Promise.all(clubIds.split(',').map(async id => {
-        try {
-          const response = await fetch(`/api/clubs/${id}/eligibility/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` }, signal: controller.signal,
-          })
-          if (!response.ok) return [id, null] as const
-          const result: { eligible: boolean } = await response.json()
-          return [id, result.eligible ? null : 'not-eligible'] as const
-        } catch { return [id, null] as const }
-      }))
-      if (!controller.signal.aborted) setBadges(Object.fromEntries(entries))
+      const entries = await Promise.all(
+        clubIds.split(',').map(async id => {
+          try {
+            const response = await fetch(
+              `/api/clubs/${id}/eligibility/me`,
+              {
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                },
+                signal: controller.signal,
+              }
+            )
+
+            if (!response.ok) {
+              return [id, null] as const
+            }
+
+            const result: {
+              eligible: boolean
+              membership?: {
+                alreadyActiveMember: boolean
+              }
+            } = await response.json()
+
+            let badge: ClubBadgeStatus = null
+
+            if (result.membership?.alreadyActiveMember === true) {
+              badge = 'member'
+            } else if (result.eligible === false) {
+              badge = 'not-eligible'
+            }
+
+            return [id, badge] as const
+          } catch {
+            return [id, null] as const
+          }
+        })
+      )
+
+      if (!controller.signal.aborted) {
+        setBadgeResult({
+          key: badgeKey,
+          badges: Object.fromEntries(entries),
+        })
+      }
     }
+
     void load()
+
     return () => controller.abort()
-  }, [accessToken, clubIds])
-  return badges
+  }, [accessToken, clubIds, badgeKey])
+
+  return badgeResult.key === badgeKey
+    ? badgeResult.badges
+    : {}
 }
 
 type ClubCardProps = {

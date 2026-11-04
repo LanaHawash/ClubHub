@@ -3,7 +3,7 @@ import { ClubsService } from '../src/modules/clubs/clubs.service';
 import { CreateClubDto } from '../src/modules/clubs/dto/create-club.dto';
 import { PrismaService } from '../src/shared/prisma/prisma.service';
 import { jest } from '@jest/globals';
-
+import { MembershipWindowReconcilerService } from '../src/modules/clubs/membership-window-reconciler.service';
 /**
  * REAL PostgreSQL tests. Never run on clubhub_dev.
  * Uses unique immutable fixtures; does not try to delete protected windows/fee versions.
@@ -473,5 +473,228 @@ it('returns CLUB_ARCHIVED when an always-open club is archived during availabili
     checkpoint.release(); checkpoint.restore();
   }
 });
+it('recovers a missed registration opening without student traffic', async () => {
+  const { clubId, windowId, opensAt } =
+    await createActiveWindow('missed-opening-recovery');
 
+  // Simulate a registration window that opened while
+  // the API was offline.
+  //
+  // No availability request is made.
+  // No manual activation is performed.
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(before.effectiveFeeVersionId).toBeNull();
+
+  // Simulate the automatic reconciler running
+  // after the application becomes available again.
+
+  const firstRun = await prisma.$queryRaw<
+    { snapshot_due_membership_windows: number }[]
+  >`
+    SELECT snapshot_due_membership_windows(${clubId}::uuid)
+  `;
+
+  expect(firstRun[0].snapshot_due_membership_windows).toBe(1);
+
+  // Verify the correct historical prices were preserved.
+
+  const recovered = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(recovered.effectiveFeeVersionId).not.toBeNull();
+
+  const feeVersion = await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+    where: { id: recovered.effectiveFeeVersionId! },
+  });
+
+  expect(feeVersion.firstTimeFee.toFixed(2)).toBe('40.00');
+  expect(feeVersion.renewalFee.toFixed(2)).toBe('25.00');
+
+  // The effective date must match the original
+  // scheduled opening time, not the recovery time.
+
+  expect(feeVersion.effectiveAt.toISOString()).toBe(
+    opensAt.toISOString(),
+  );
+
+  // Running recovery again must not produce
+  // an additional fee version.
+
+  const secondRun = await prisma.$queryRaw<
+    { snapshot_due_membership_windows: number }[]
+  >`
+    SELECT snapshot_due_membership_windows(${clubId}::uuid)
+  `;
+
+  expect(secondRun[0].snapshot_due_membership_windows).toBe(0);
+
+  const versions = await prisma.clubMembershipFeeVersion.findMany({
+    where: { clubId },
+  });
+
+  expect(versions).toHaveLength(1);
+  expect(versions[0].id).toBe(recovered.effectiveFeeVersionId);
+});
+it('rejects a fee transaction that commits after its window opens', async () => {
+  const club = await service.create(dto('commit-boundary'));
+
+  const window = await prisma.clubRegistrationWindow.findFirstOrThrow({
+    where: { clubId: club.id },
+  });
+
+  // Schedule the opening sufficiently far in the future
+  // to begin a controlled transaction before the boundary.
+  const opensAt = new Date(Date.now() + 3_000);
+
+  await prisma.clubRegistrationWindow.update({
+    where: { id: window.id },
+    data: {
+      opensAt,
+      closesAt: new Date(opensAt.getTime() + 3_600_000),
+    },
+  });
+
+  const settings = await prisma.clubMembershipSettings.findUniqueOrThrow({
+    where: { clubId: club.id },
+  });
+
+  // Begin changing pending fees BEFORE the window opens.
+  // Deliberately keep the transaction open across the boundary.
+  const attemptedUpdate = prisma.$transaction(
+    async tx => {
+      await tx.clubMembershipSettings.update({
+        where: { clubId: club.id },
+        data: {
+          pendingFirstTimeFee: '50.00',
+          pendingRenewalFee: '30.00',
+          configVersion: { increment: 1 },
+        },
+      });
+
+      // Confirm the mutation occurred before opening.
+      const timestamp = await tx.$queryRaw<{ now: Date }[]>`
+        SELECT clock_timestamp() AS now
+      `;
+
+      expect(timestamp[0].now.getTime()).toBeLessThan(
+        opensAt.getTime(),
+      );
+
+      // Hold the transaction until after the window opens.
+      await new Promise<void>(resolve => {
+        setTimeout(
+          resolve,
+          Math.max(0, opensAt.getTime() - Date.now() + 200),
+        );
+      });
+    },
+    { timeout: 10_000 },
+  );
+
+  // PostgreSQL's deferred boundary trigger should reject
+  // the transaction instead of allowing late fee changes.
+  await expect(attemptedUpdate).rejects.toThrow();
+
+  // A rejected transaction must preserve the original fees.
+  const persistedSettings =
+    await prisma.clubMembershipSettings.findUniqueOrThrow({
+      where: { clubId: club.id },
+    });
+
+  expect(persistedSettings.pendingFirstTimeFee.toFixed(2)).toBe('40.00');
+  expect(persistedSettings.pendingRenewalFee.toFixed(2)).toBe('25.00');
+  expect(persistedSettings.configVersion).toBe(settings.configVersion);
+
+  // Recover the missed opening and verify the original
+  // prices become the immutable historical snapshot.
+  await prisma.$queryRaw`
+    SELECT snapshot_due_membership_windows(${club.id}::uuid)
+  `;
+
+  const recoveredWindow =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: window.id },
+    });
+
+  expect(recoveredWindow.effectiveFeeVersionId).not.toBeNull();
+
+  const lockedFees =
+    await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+      where: { id: recoveredWindow.effectiveFeeVersionId! },
+    });
+
+  expect(lockedFees.firstTimeFee.toFixed(2)).toBe('40.00');
+  expect(lockedFees.renewalFee.toFixed(2)).toBe('25.00');
+  expect(lockedFees.effectiveAt.toISOString()).toBe(
+    opensAt.toISOString(),
+  );
+
+  expect(
+    await prisma.clubMembershipFeeVersion.count({
+      where: { clubId: club.id },
+    }),
+  ).toBe(1);
+});
+it('automatically recovers a missed window when the reconciler starts', async () => {
+  const { clubId, windowId, opensAt } =
+    await createActiveWindow('automatic-recovery');
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(before.effectiveFeeVersionId).toBeNull();
+
+  // Start the actual background reconciler.
+  // This simulates its initialization when the API starts.
+  const reconciler = new MembershipWindowReconcilerService(prisma);
+
+  try {
+    reconciler.onModuleInit();
+
+    // Wait for the asynchronous reconciliation to complete.
+    // Poll instead of assuming a specific execution duration.
+    let recoveredWindow = before;
+    const deadline = Date.now() + 10_000;
+
+    while (
+      recoveredWindow.effectiveFeeVersionId === null &&
+      Date.now() < deadline
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      recoveredWindow =
+        await prisma.clubRegistrationWindow.findUniqueOrThrow({
+          where: { id: windowId },
+        });
+    }
+
+    expect(recoveredWindow.effectiveFeeVersionId).not.toBeNull();
+
+    const feeVersion =
+      await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+        where: { id: recoveredWindow.effectiveFeeVersionId! },
+      });
+
+    expect(feeVersion.firstTimeFee.toFixed(2)).toBe('40.00');
+    expect(feeVersion.renewalFee.toFixed(2)).toBe('25.00');
+
+    expect(feeVersion.effectiveAt.toISOString()).toBe(
+      opensAt.toISOString(),
+    );
+
+    expect(
+      await prisma.clubMembershipFeeVersion.count({
+        where: { clubId },
+      }),
+    ).toBe(1);
+  } finally {
+    reconciler.onModuleDestroy();
+  }
+});
 });

@@ -7,7 +7,10 @@ import {
   Lock,
 } from 'lucide-react'
 import { clubTone, getClubInitials } from '../components/ClubCard'
-
+import {
+  membershipUtcToDate,
+  membershipUtcToInclusiveClosingDate,
+} from '../utils/membershipDates'
 type ApiClub = {
   id: string
   name: string
@@ -84,11 +87,23 @@ type ClubPageProps = {
   onSignIn: () => void
 }
 
-function formatMembershipDate(value: string) {
-  return new Date(value).toLocaleDateString('en-GB', {
+function formatMembershipDate(
+  value: string,
+  inclusiveClosing = false,
+) {
+  const date = inclusiveClosing
+    ? membershipUtcToInclusiveClosingDate(value)
+    : membershipUtcToDate(value)
+
+  const [year, month, day] = date.split('-').map(Number)
+
+  return new Date(
+    Date.UTC(year, month - 1, day, 12),
+  ).toLocaleDateString('en-GB', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
+    timeZone: 'UTC',
   })
 }
 
@@ -135,7 +150,8 @@ function registrationWindowMessage(
     case 'OPEN':
       return availability.window
         ? `Registration is open until ${formatMembershipDate(
-            availability.window.closesAt
+            availability.window.closesAt,
+            true,
           )}.`
         : 'Registration is open.'
 

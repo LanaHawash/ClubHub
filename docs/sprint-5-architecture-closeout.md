@@ -285,7 +285,9 @@ These are the **actual controller routes** verified in `apps/api/src/modules/clu
 | `PATCH` | `/clubs/:id/membership/fees` | Deanship | `{ firstTimeFee: string, renewalFee: string, configVersion: int }`; positive values are enforced by service/DB |
 | `PATCH` | `/clubs/:id/membership/mode` | Deanship | `{ registrationMode: 'ALWAYS_OPEN' \| 'WINDOWED', configVersion: int }` |
 | `POST` | `/clubs/:id/membership/windows` | Deanship | `{ opensAt: ISO8601 string, closesAt: ISO8601 string }` |
-| `PATCH` | `/clubs/:id/membership/windows/:windowId` | Deanship | Update permissible window dates / extend active window |
+| `PATCH` | `/clubs/:id/membership/windows/:windowId` | Deanship | Edit a permitted future registration window |
+| `PATCH` | `/clubs/:id/membership/windows/:windowId/extend` | Deanship | Extend an actively open registration window while preserving its locked fee version |
+| `PATCH` | `/clubs/:id/membership/windows/:windowId/cancel` | Deanship | Cancel an individual future, unlocked registration window while preserving its history |
 | `PATCH` | `/clubs/:id/membership/windows/:windowId/close` | Deanship | Close an active window early; retain historical closure |
 | `GET` | `/clubs/:id/membership/availability` | Public | Server-authoritative registration state, selected window, effective fees |
 | `GET` | `/clubs/:id/eligibility/me` | Student | Academic eligibility **plus** personal membership state/quote |
@@ -356,6 +358,31 @@ Renewal is determined by **any previous confirmed `Membership`** for the same st
 
 The club-card function `useClubEligibility` currently calls the authenticated eligibility endpoint per club; performance/rate considerations may warrant batching later if the catalog grows. This is an implementation observation, not a Sprint 5 completion blocker.
 
+### 6.1 Post-merge UI and timezone corrections
+
+The Sprint 5 post-merge correction branch completed the following frontend integrations:
+
+| Surface | Implemented behavior |
+|---|---|
+| Deanship — Create Club | Membership fee fields consistently display ILS rather than dollar symbols. Registration dates are converted using Palestine-local calendar boundaries. |
+| Deanship — Club Management Detail | Active registration windows expose a dedicated Extend action. Future, unlocked registration windows expose individual cancellation controls. |
+| Public club cards | Cards retrieve the public membership-availability endpoint and display published prices or appropriate scheduled, closed, or unavailable states. |
+| Student club page | Registration dates and inclusive closing-day messages are displayed in Palestine time. |
+| Shared date utility | `apps/web/src/utils/membershipDates.ts` centralizes membership registration date conversion and formatting. |
+
+**Registration timezone:** `Asia/Hebron`.
+
+The UI interprets a selected opening date as midnight at the beginning of that date in Palestine.
+
+A selected closing date is inclusive for users. The API stores its exclusive boundary at midnight at the beginning of the following Palestine-local calendar day.
+
+For example, a selected last registration day of 20 November 2026 is stored as `2026-11-20T22:00:00.000Z`, equivalent to midnight on 21 November in Palestine.
+
+These conversions are independent of the browser's local timezone and account for applicable daylight-saving offsets.
+
+Membership pricing and registration availability remain server-authoritative. Public visitors do not receive personalized eligibility or membership information.
+
+Student membership applications and payments remain deferred to Sprint 6.
 ## 7. Deviations from the original sprint plan
 
 | Original proposal | Approved / implemented behavior |
@@ -391,6 +418,43 @@ Business-rule authority: `docs/sprint-5-membership-specifications.md`; additiona
 
 **Sprint 5 closure recommendation:** **Ready for final acceptance review, not automatically closed by creation of this document.**
 
+### Post-merge correction verification — 5 November 2026
+
+Following the original Sprint 5 merge, five corrections were implemented on `feature/sprint-5-post-merge-fixes`.
+
+The corrections cover active-window extension, individual scheduled-window cancellation, ILS currency labels, public club-card membership pricing, and Asia/Hebron registration-date consistency.
+
+#### Local verification
+
+| Check | Result |
+|---|---|
+| PostgreSQL membership lifecycle integration tests | 36/36 passed |
+| Permanent timezone regression tests | 8/8 passed |
+| Full API Jest suite | Passed |
+| API production build | Passed |
+| Frontend production build | Passed |
+| Git whitespace validation | Passed |
+| Scheduled-window cancellation browser acceptance | Passed |
+| Active-window extension browser acceptance | Passed |
+| Public club-card pricing browser acceptance | Passed |
+
+The PostgreSQL tests ran against the isolated `clubhub_test` database. Temporary manual-acceptance fixtures were not added to the source-code branch.
+
+The extension browser test confirmed that an active window remained open after its closing date was extended. PostgreSQL verification confirmed the persisted closing timestamp, unchanged window identity, and presence of its locked fee version.
+
+These results represent local verification, not production deployment or GitHub CI approval.
+
+#### Remaining closeout requirements
+
+1. Review the complete correction-branch Git diff.
+2. Commit and push the correction branch.
+3. Create and review the pull request.
+4. Confirm GitHub CI results and merge into `main`.
+5. Restore the normal development API connection to `clubhub_dev`.
+
+**Status:** Post-merge correction implementation and local verification complete. Repository closeout remains pending.
+
+For detailed lifecycle evidence and tracked follow-up issues, see `docs/sprint-5d-lifecycle-verification.md`.
 ## 9. Sprint 6 / 7 handoff
 
 **Sprint 6 — membership applications and payments:** Add persisted application and payment entities with audit history, immutable quoted fee/currency and fee-version provenance, pending/deadline status, unique pending-application enforcement, cancellation/expiration, secure manual/online payment confirmation, and atomic activation of confirmed `Membership` rows. Registration closure/extension/policy switches must update or invalidate unpaid applications consistently and safely under concurrent payment attempts. Avoid granting membership on application submission.

@@ -1744,6 +1744,115 @@ async createRegistrationWindow(
     });
   });
 }
+async cancelScheduledRegistrationWindow(
+  clubId: string,
+  windowId: string,
+) {
+  return this.prisma.$transaction(async (tx) => {
+    // Preserve the existing membership lifecycle locking order:
+    // membership settings first, registration window second.
+    const settingsLock = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubMembershipSettings"
+      WHERE "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
+
+    if (settingsLock.length === 0) {
+      throw new ConflictException(
+        'Membership configuration is missing.',
+      );
+    }
+
+    const windowLock = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubRegistrationWindow"
+      WHERE "id" = ${windowId}::uuid
+        AND "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
+
+    if (windowLock.length === 0) {
+      throw new NotFoundException(
+        'Registration window not found.',
+      );
+    }
+
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: {
+        status: true,
+        membershipSettings: {
+          select: {
+            registrationMode: true,
+          },
+        },
+      },
+    });
+
+    if (!club || club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Archived or missing clubs cannot cancel registration windows.',
+      );
+    }
+
+    if (
+      club.membershipSettings?.registrationMode !== 'WINDOWED'
+    ) {
+      throw new ConflictException(
+        'Registration must be in Scheduled mode.',
+      );
+    }
+
+    const existing =
+      await tx.clubRegistrationWindow.findUniqueOrThrow({
+        where: { id: windowId },
+      });
+
+    // Use PostgreSQL time as the authoritative clock.
+    const clock = await tx.$queryRaw<{ now: Date }[]>`
+      SELECT clock_timestamp() AS now
+    `;
+
+    const now = clock[0].now;
+
+    if (
+      existing.opensAt <= now ||
+      existing.closedAt !== null ||
+      existing.canceledAt !== null ||
+      existing.effectiveFeeVersionId !== null
+    ) {
+      throw new ConflictException(
+        'Only future, unlocked registration windows can be canceled.',
+      );
+    }
+
+    // Preserve the existing record. Never hard-delete history.
+    const result = await tx.clubRegistrationWindow.updateMany({
+      where: {
+        id: windowId,
+        clubId,
+        opensAt: { gt: now },
+        closedAt: null,
+        canceledAt: null,
+        effectiveFeeVersionId: null,
+      },
+      data: {
+        canceledAt: now,
+      },
+    });
+
+    if (result.count !== 1) {
+      throw new ConflictException(
+        'Registration window changed. Reload and retry.',
+      );
+    }
+
+    return tx.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+  });
+}
 async closeRegistrationWindow(
   clubId: string,
   windowId: string,
@@ -1843,6 +1952,136 @@ async closeRegistrationWindow(
 
     return tx.clubRegistrationWindow.findUniqueOrThrow({
       where: { id: windowId },
+    });
+  });
+}
+async extendRegistrationWindow(
+  clubId: string,
+  windowId: string,
+  closesAtValue: string,
+) {
+  const newClosesAt = new Date(closesAtValue);
+
+  if (!Number.isFinite(newClosesAt.getTime())) {
+    throw new BadRequestException('Invalid closing date.');
+  }
+
+  return this.prisma.$transaction(async (tx) => {
+    // Match the membership lifecycle's locking order:
+    // settings first, then registration window.
+    const settingsLock = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubMembershipSettings"
+      WHERE "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
+
+    if (settingsLock.length === 0) {
+      throw new ConflictException(
+        'Membership configuration is missing.',
+      );
+    }
+
+    const windowLock = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubRegistrationWindow"
+      WHERE "id" = ${windowId}::uuid
+        AND "clubId" = ${clubId}::uuid
+      FOR UPDATE
+    `;
+
+    if (windowLock.length === 0) {
+      throw new NotFoundException(
+        'Registration window not found.',
+      );
+    }
+
+    const club = await tx.club.findUnique({
+      where: { id: clubId },
+      select: {
+        status: true,
+        membershipSettings: {
+          select: { registrationMode: true },
+        },
+      },
+    });
+
+    if (!club || club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Archived or missing clubs cannot extend registration.',
+      );
+    }
+
+    if (
+      club.membershipSettings?.registrationMode !== 'WINDOWED'
+    ) {
+      throw new ConflictException(
+        'Registration must be in Scheduled mode.',
+      );
+    }
+
+    const existing =
+      await tx.clubRegistrationWindow.findUniqueOrThrow({
+        where: { id: windowId },
+      });
+
+    const clock = await tx.$queryRaw<{ now: Date }[]>`
+      SELECT clock_timestamp() AS now
+    `;
+
+    const now = clock[0].now;
+
+    // Only currently active windows may be extended.
+    if (
+      existing.opensAt > now ||
+      existing.closesAt <= now ||
+      existing.closedAt !== null ||
+      existing.canceledAt !== null ||
+      existing.effectiveFeeVersionId === null
+    ) {
+      throw new ConflictException(
+        'Only an active registration window with locked fees can be extended.',
+      );
+    }
+
+    if (
+      newClosesAt <= existing.closesAt ||
+      newClosesAt <= now
+    ) {
+      throw new BadRequestException(
+        'The new closing date must be later than the current closing date.',
+      );
+    }
+
+    // A window must not overlap another scheduled or
+    // currently effective registration interval.
+    const overlapping =
+      await tx.clubRegistrationWindow.findFirst({
+        where: {
+          clubId,
+          id: { not: windowId },
+          canceledAt: null,
+          opensAt: { lt: newClosesAt },
+          closesAt: { gt: existing.opensAt },
+          OR: [
+            { closedAt: null },
+            { closedAt: { gt: existing.opensAt } },
+          ],
+        },
+        select: { id: true },
+      });
+
+    if (overlapping) {
+      throw new ConflictException(
+        'The extended window would overlap another registration window.',
+      );
+    }
+
+    // Update only closesAt. Never replace the window
+    // or modify its locked membership fee version.
+    return tx.clubRegistrationWindow.update({
+      where: { id: windowId },
+      data: { closesAt: newClosesAt },
     });
   });
 }

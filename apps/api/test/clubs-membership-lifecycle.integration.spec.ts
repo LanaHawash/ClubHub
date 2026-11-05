@@ -1020,4 +1020,650 @@ const spy = jest
     spy.mockRestore();
   }
 });
+it('extends an active registration window without changing its identity or locked fees', async () => {
+  const { clubId, windowId } =
+    await createActiveWindow('active-extension');
+
+  // Lock the window's membership prices.
+  await service.activateRegistrationWindowFees(
+    clubId,
+    windowId,
+  );
+
+  const before =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+
+  expect(before.effectiveFeeVersionId).not.toBeNull();
+
+  const feeBefore =
+    await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+      where: {
+        id: before.effectiveFeeVersionId!,
+      },
+    });
+
+  // Extend the closing time by one hour.
+  const extendedClosing = new Date(
+    before.closesAt.getTime() + 60 * 60 * 1000,
+  );
+
+  const result = await service.extendRegistrationWindow(
+    clubId,
+    windowId,
+    extendedClosing.toISOString(),
+  );
+
+  // The same registration window must be updated.
+  expect(result.id).toBe(windowId);
+
+  // The original opening timestamp must remain unchanged.
+  expect(result.opensAt.toISOString()).toBe(
+    before.opensAt.toISOString(),
+  );
+
+  // Only the closing timestamp changes.
+  expect(result.closesAt.toISOString()).toBe(
+    extendedClosing.toISOString(),
+  );
+
+  // The effective fee version must remain unchanged.
+  expect(result.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+
+  // The historical fee amounts must remain unchanged.
+  const feeAfter =
+    await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+      where: {
+        id: before.effectiveFeeVersionId!,
+      },
+    });
+
+  expect(feeAfter.firstTimeFee.toFixed(2)).toBe(
+    feeBefore.firstTimeFee.toFixed(2),
+  );
+
+  expect(feeAfter.renewalFee.toFixed(2)).toBe(
+    feeBefore.renewalFee.toFixed(2),
+  );
+
+  expect(feeAfter.effectiveAt.toISOString()).toBe(
+    feeBefore.effectiveAt.toISOString(),
+  );
+
+  // Registration must remain available.
+  const availability =
+    await service.getMembershipAvailability(clubId);
+
+  expect(availability.status).toBe('OPEN');
+  expect(availability.registrationAvailable).toBe(true);
+  expect(availability.window?.id).toBe(windowId);
+
+  expect(availability.window?.closesAt.toISOString()).toBe(
+    extendedClosing.toISOString(),
+  );
+});
+it('rejects extending a registration window that has not opened', async () => {
+  const club = await service.create(dto('extend-future'));
+
+  const window = await prisma.clubRegistrationWindow.findFirstOrThrow({
+    where: { clubId: club.id },
+  });
+
+  const newClosing = new Date(
+    window.closesAt.getTime() + 60 * 60 * 1000,
+  );
+
+  await expect(
+    service.extendRegistrationWindow(
+      club.id,
+      window.id,
+      newClosing.toISOString(),
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const preserved = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: window.id },
+  });
+
+  expect(preserved.closesAt.toISOString()).toBe(
+    window.closesAt.toISOString(),
+  );
+});
+it('rejects extending an early-closed registration window', async () => {
+  const { clubId, windowId } =
+    await createActiveWindow('extend-closed');
+
+  await service.activateRegistrationWindowFees(
+    clubId,
+    windowId,
+  );
+
+  await service.closeRegistrationWindow(
+    clubId,
+    windowId,
+  );
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(before.closedAt).not.toBeNull();
+
+  const newClosing = new Date(
+    before.closesAt.getTime() + 60 * 60 * 1000,
+  );
+
+  await expect(
+    service.extendRegistrationWindow(
+      clubId,
+      windowId,
+      newClosing.toISOString(),
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(after.closesAt.toISOString()).toBe(
+    before.closesAt.toISOString(),
+  );
+
+  expect(after.closedAt?.toISOString()).toBe(
+    before.closedAt?.toISOString(),
+  );
+
+  expect(after.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+});
+it('rejects shortening an active registration window', async () => {
+  const { clubId, windowId } =
+    await createActiveWindow('extend-shortening');
+
+  await service.activateRegistrationWindowFees(
+    clubId,
+    windowId,
+  );
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  const shorterClosing = new Date(
+    before.closesAt.getTime() - 60 * 1000,
+  );
+
+  await expect(
+    service.extendRegistrationWindow(
+      clubId,
+      windowId,
+      shorterClosing.toISOString(),
+    ),
+  ).rejects.toThrow();
+
+  const after = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(after.closesAt.toISOString()).toBe(
+    before.closesAt.toISOString(),
+  );
+
+  expect(after.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+});
+it('rejects extending registration for an archived club', async () => {
+  const { clubId, windowId } =
+    await createActiveWindow('extend-archived');
+
+  await service.activateRegistrationWindowFees(
+    clubId,
+    windowId,
+  );
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  await service.archive(clubId);
+
+  const newClosing = new Date(
+    before.closesAt.getTime() + 60 * 60 * 1000,
+  );
+
+  await expect(
+    service.extendRegistrationWindow(
+      clubId,
+      windowId,
+      newClosing.toISOString(),
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(after.closesAt.toISOString()).toBe(
+    before.closesAt.toISOString(),
+  );
+
+  expect(after.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+});
+it('rejects extending a naturally expired registration window', async () => {
+  const club = await service.create(dto('extend-expired'));
+
+  const scheduled = await prisma.clubRegistrationWindow.findFirstOrThrow({
+    where: { clubId: club.id },
+  });
+
+  // Move the still-future fixture into the past.
+  // The fixture is modified before its original opening time.
+  const opensAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const closesAt = new Date(Date.now() - 60 * 60 * 1000);
+
+  await prisma.clubRegistrationWindow.update({
+    where: { id: scheduled.id },
+    data: { opensAt, closesAt },
+  });
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: scheduled.id },
+  });
+
+  const proposedClosing = new Date(
+    Date.now() + 60 * 60 * 1000,
+  );
+
+  await expect(
+    service.extendRegistrationWindow(
+      club.id,
+      scheduled.id,
+      proposedClosing.toISOString(),
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: scheduled.id },
+  });
+
+  expect(after.opensAt.toISOString()).toBe(
+    before.opensAt.toISOString(),
+  );
+
+  expect(after.closesAt.toISOString()).toBe(
+    before.closesAt.toISOString(),
+  );
+
+  expect(after.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+});
+it('rejects an active-window extension that overlaps a scheduled window', async () => {
+  const { clubId, windowId } =
+    await createActiveWindow('extend-overlap');
+
+  await service.activateRegistrationWindowFees(
+    clubId,
+    windowId,
+  );
+
+  const before = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  // Schedule another window after the current window closes.
+  const futureOpensAt = new Date(
+    before.closesAt.getTime() + 30 * 60 * 1000,
+  );
+
+  const futureClosesAt = new Date(
+    futureOpensAt.getTime() + 60 * 60 * 1000,
+  );
+
+  const nextWindow = await service.createRegistrationWindow(
+    clubId,
+    {
+      opensAt: futureOpensAt.toISOString(),
+      closesAt: futureClosesAt.toISOString(),
+    },
+  );
+
+  // Attempt to extend the current window into the next one.
+  const overlappingClosing = new Date(
+    futureOpensAt.getTime() + 30 * 60 * 1000,
+  );
+
+  await expect(
+    service.extendRegistrationWindow(
+      clubId,
+      windowId,
+      overlappingClosing.toISOString(),
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  // The existing active window must remain unchanged.
+  const preserved = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: windowId },
+  });
+
+  expect(preserved.closesAt.toISOString()).toBe(
+    before.closesAt.toISOString(),
+  );
+
+  expect(preserved.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+
+  // The future registration window must also remain unchanged.
+  const preservedNext = await prisma.clubRegistrationWindow.findUniqueOrThrow({
+    where: { id: nextWindow.id },
+  });
+
+  expect(preservedNext.opensAt.toISOString()).toBe(
+    futureOpensAt.toISOString(),
+  );
+
+  expect(preservedNext.closesAt.toISOString()).toBe(
+    futureClosesAt.toISOString(),
+  );
+});
+it('cancels one scheduled window without affecting another window or registration mode', async () => {
+  const club = await service.create(
+    dto('cancel-one-scheduled-window'),
+  );
+
+  // The test helper creates an initial future window.
+  const firstWindow =
+    await prisma.clubRegistrationWindow.findFirstOrThrow({
+      where: { clubId: club.id },
+    });
+
+  expect(firstWindow.canceledAt).toBeNull();
+  expect(firstWindow.effectiveFeeVersionId).toBeNull();
+
+  // Create another non-overlapping future window.
+  const secondWindow =
+    await service.createRegistrationWindow(club.id, {
+      opensAt: '2099-03-01T00:00:00.000Z',
+      closesAt: '2099-04-01T00:00:00.000Z',
+    });
+
+  // Cancel ONLY the second window.
+  const canceled =
+    await service.cancelScheduledRegistrationWindow(
+      club.id,
+      secondWindow.id,
+    );
+
+  expect(canceled.id).toBe(secondWindow.id);
+  expect(canceled.canceledAt).not.toBeNull();
+  expect(canceled.effectiveFeeVersionId).toBeNull();
+
+  // Verify cancellation was persisted.
+  const savedCanceled =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: secondWindow.id },
+    });
+
+  expect(savedCanceled.canceledAt).not.toBeNull();
+  expect(savedCanceled.effectiveFeeVersionId).toBeNull();
+
+  // The first window must remain scheduled and unchanged.
+  const preservedFirst =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: firstWindow.id },
+    });
+
+  expect(preservedFirst.canceledAt).toBeNull();
+  expect(preservedFirst.closedAt).toBeNull();
+  expect(preservedFirst.effectiveFeeVersionId).toBeNull();
+
+  expect(preservedFirst.opensAt.toISOString()).toBe(
+    firstWindow.opensAt.toISOString(),
+  );
+
+  expect(preservedFirst.closesAt.toISOString()).toBe(
+    firstWindow.closesAt.toISOString(),
+  );
+
+  // The club must remain in WINDOWED registration mode.
+  const settings =
+    await prisma.clubMembershipSettings.findUniqueOrThrow({
+      where: { clubId: club.id },
+    });
+
+  expect(settings.registrationMode).toBe('WINDOWED');
+
+  // A replacement window may use the canceled window's dates.
+  const replacement =
+    await service.createRegistrationWindow(club.id, {
+      opensAt: secondWindow.opensAt.toISOString(),
+      closesAt: secondWindow.closesAt.toISOString(),
+    });
+
+  expect(replacement.id).not.toBe(secondWindow.id);
+  expect(replacement.canceledAt).toBeNull();
+  expect(replacement.effectiveFeeVersionId).toBeNull();
+
+  // The canceled window must still exist as history.
+  expect(
+    await prisma.clubRegistrationWindow.findUnique({
+      where: { id: secondWindow.id },
+    }),
+  ).not.toBeNull();
+
+  // Both usable windows should remain scheduled.
+  const availability =
+    await service.getMembershipAvailability(club.id);
+
+  expect(availability.status).toBe('SCHEDULED');
+  expect(availability.window?.id).toBe(firstWindow.id);
+});
+it('rejects canceling an active registration window', async () => {
+  const { clubId, windowId } =
+    await createActiveWindow('cancel-active');
+
+  await service.activateRegistrationWindowFees(
+    clubId,
+    windowId,
+  );
+
+  const before =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+
+  await expect(
+    service.cancelScheduledRegistrationWindow(
+      clubId,
+      windowId,
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: windowId },
+    });
+
+  expect(after.canceledAt).toBeNull();
+  expect(after.closedAt).toBeNull();
+  expect(after.effectiveFeeVersionId).toBe(
+    before.effectiveFeeVersionId,
+  );
+});
+it('rejects canceling an expired registration window', async () => {
+  const club = await service.create(
+    dto('cancel-expired'),
+  );
+
+  const scheduled =
+    await prisma.clubRegistrationWindow.findFirstOrThrow({
+      where: { clubId: club.id },
+    });
+
+  // Move the still-future fixture into the past.
+  const opensAt = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const closesAt = new Date(Date.now() - 60 * 60 * 1000);
+
+  await prisma.clubRegistrationWindow.update({
+    where: { id: scheduled.id },
+    data: { opensAt, closesAt },
+  });
+
+  await expect(
+    service.cancelScheduledRegistrationWindow(
+      club.id,
+      scheduled.id,
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: scheduled.id },
+    });
+
+  expect(after.canceledAt).toBeNull();
+  expect(after.opensAt.toISOString()).toBe(opensAt.toISOString());
+  expect(after.closesAt.toISOString()).toBe(closesAt.toISOString());
+});
+it('rejects canceling an already canceled registration window', async () => {
+  const club = await service.create(
+    dto('cancel-twice'),
+  );
+
+  const scheduled =
+    await prisma.clubRegistrationWindow.findFirstOrThrow({
+      where: { clubId: club.id },
+    });
+
+  const first =
+    await service.cancelScheduledRegistrationWindow(
+      club.id,
+      scheduled.id,
+    );
+
+  expect(first.canceledAt).not.toBeNull();
+
+  await expect(
+    service.cancelScheduledRegistrationWindow(
+      club.id,
+      scheduled.id,
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: scheduled.id },
+    });
+
+  expect(after.canceledAt?.toISOString()).toBe(
+    first.canceledAt?.toISOString(),
+  );
+});
+it('rejects canceling a scheduled window for an archived club', async () => {
+  const club = await service.create(
+    dto('cancel-archived'),
+  );
+
+  const scheduled =
+    await prisma.clubRegistrationWindow.findFirstOrThrow({
+      where: { clubId: club.id },
+    });
+
+  await service.archive(club.id);
+
+  await expect(
+    service.cancelScheduledRegistrationWindow(
+      club.id,
+      scheduled.id,
+    ),
+  ).rejects.toThrow(ConflictException);
+
+  const after =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: scheduled.id },
+    });
+
+  expect(after.canceledAt).toBeNull();
+});
+it('rejects cancellation when a scheduled window becomes active during a competing transaction', async () => {
+  const club = await service.create(
+    dto('cancel-opening-race'),
+  );
+
+  const scheduled =
+    await prisma.clubRegistrationWindow.findFirstOrThrow({
+      where: { clubId: club.id },
+    });
+
+  expect(scheduled.opensAt.getTime()).toBeGreaterThan(Date.now());
+
+  let cancellation: Promise<void> | undefined;
+
+  // Hold the same membership-settings lock used by cancellation.
+  // While it is held, move the scheduled window into its active interval.
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT "id"
+      FROM "ClubMembershipSettings"
+      WHERE "clubId" = ${club.id}::uuid
+      FOR UPDATE
+    `;
+
+    // Begin cancellation while another transaction owns the lock.
+    cancellation = expect(
+      service.cancelScheduledRegistrationWindow(
+        club.id,
+        scheduled.id,
+      ),
+    ).rejects.toThrow(ConflictException);
+
+    // Simulate the window opening before cancellation obtains its lock.
+    const opensAt = new Date(Date.now() - 60_000);
+    const closesAt = new Date(Date.now() + 60 * 60_000);
+
+    await tx.clubRegistrationWindow.update({
+      where: { id: scheduled.id },
+      data: { opensAt, closesAt },
+    });
+  });
+
+  if (!cancellation) {
+    throw new Error('Cancellation was not started.');
+  }
+
+  await cancellation;
+
+  const preserved =
+    await prisma.clubRegistrationWindow.findUniqueOrThrow({
+      where: { id: scheduled.id },
+    });
+
+  expect(preserved.canceledAt).toBeNull();
+  expect(preserved.opensAt.getTime()).toBeLessThanOrEqual(Date.now());
+  expect(preserved.closesAt.getTime()).toBeGreaterThan(Date.now());
+
+  // The window must remain eligible for normal fee activation.
+  const activated = await service.activateRegistrationWindowFees(
+    club.id,
+    scheduled.id,
+  );
+
+  expect(activated.effectiveFeeVersionId).not.toBeNull();
+
+  const availability = await service.getMembershipAvailability(
+    club.id,
+  );
+
+  expect(availability.status).toBe('OPEN');
+  expect(availability.registrationAvailable).toBe(true);
+});
+
 });

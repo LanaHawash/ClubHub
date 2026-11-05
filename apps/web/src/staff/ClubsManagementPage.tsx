@@ -6,6 +6,10 @@ import StudentBoardPicker from './StudentBoardPicker'
 import ClubImageUpload from './ClubImageUpload'
 import ClubLabelsPicker from './ClubLabelsPicker'
 import type { ClubLabelsSelection } from './ClubLabelsPicker'
+import {
+  membershipDateToUtc,
+  membershipClosingDateToUtc,
+} from '../utils/membershipDates'
 type ClubClassification = 'GENERAL' | 'FACULTY_BASED' | 'MAJOR_BASED'
 type Club = {
   id: string
@@ -352,11 +356,27 @@ export default function ClubsManagementPage({
       return
     }
 
-    const opening = new Date(`${windowStart}T00:00:00`)
+    let opening: Date
+    let closing: Date
+
+    try {
+      opening = membershipDateToUtc(windowStart)
+      closing = membershipClosingDateToUtc(windowEnd)
+    } catch {
+      setFormError('Choose valid registration dates.')
+      return
+    }
 
     if (opening <= new Date()) {
       setFormError(
         'The initial registration window must start in the future.'
+      )
+      return
+    }
+
+    if (closing <= opening) {
+      setFormError(
+        'The closing date must be later than the opening date.'
       )
       return
     }
@@ -387,10 +407,8 @@ export default function ClubsManagementPage({
             currency: 'ILS',
             registrationMode: windowEnabled ? 'WINDOWED' : 'ALWAYS_OPEN',
             ...(windowEnabled && {
-              opensAt: new Date(`${windowStart}T00:00:00`).toISOString(),
-              closesAt: new Date(
-                new Date(`${windowEnd}T00:00:00`).getTime() + 24 * 60 * 60 * 1000
-              ).toISOString(),
+              opensAt: membershipDateToUtc(windowStart).toISOString(),
+              closesAt: membershipClosingDateToUtc(windowEnd).toISOString(),
             }),
           },
         }),
@@ -645,7 +663,7 @@ const visibleClubs =
                 <div className="grid gap-4 sm:grid-cols-2">{[0, 1].map((slot) => <label key={slot} className="block"><span className="mb-1.5 block text-sm font-semibold">{slot === 0 ? 'Club administrator 1 · President' : 'Club administrator 2 · Second Administrator'}</span><select value={boardAdmins[slot]} onChange={(event) => setBoardAdmins((values) => values.map((value, index) => index === slot ? event.target.value : value))} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3"><option value="">Choose from the board…</option>{board.filter((member) => member.studentId && member.studentId !== boardAdmins[1 - slot]).map((member) => <option key={member.studentId} value={member.studentId}>{member.name} · {member.universityId} · {member.role}</option>)}</select></label>)}</div>
               </div>
               <div className="mt-4 max-w-sm"><label className="block"><span className="mb-1.5 block text-sm font-semibold">Club contact email</span><input type="email" required value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="name@clubs.uni.edu" className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><p className="mt-1 text-xs text-ink-2">A contact address for the club; administrator access uses individual student accounts.</p></div>
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">{[['First-time fee ($)', firstFee, setFirstFee], ['Renewal fee ($)', renewalFee, setRenewalFee]].map(([label, val, setter]) => <label key={label as string} className="block"><span className="mb-1.5 block text-sm font-semibold">{label as string}</span><input type="number" min="0.01" step="0.01" value={val as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label>)}</div>
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">{[['First-time fee (ILS)', firstFee, setFirstFee], ['Renewal fee (ILS)', renewalFee, setRenewalFee]].map(([label, val, setter]) => <label key={label as string} className="block"><span className="mb-1.5 block text-sm font-semibold">{label as string}</span><input type="number" min="0.01" step="0.01" value={val as string} onChange={(e) => (setter as (v: string) => void)(e.target.value)} className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label>)}</div>
               <p className="mb-2 mt-6 text-sm font-semibold">Membership registration window<span className="font-normal text-ink-2">(optional)</span></p>
               <div className="inline-flex rounded-full border border-ink/15 p-0.5 text-sm font-semibold"><button type="button" aria-pressed={!windowEnabled} onClick={() => setWindowEnabled(false)} className={'rounded-full px-4 py-1.5 ' + (!windowEnabled ? 'bg-ink text-paper': 'text-ink-2')}>Any time</button><button type="button" aria-pressed={windowEnabled} onClick={() => setWindowEnabled(true)} className={'rounded-full px-4 py-1.5 ' + (windowEnabled ? 'bg-ink text-paper' : 'text-ink-2')}>Set a window</button></div>
               {windowEnabled && <div className="mt-3 grid max-w-md gap-4 sm:grid-cols-2"><label className="text-sm font-semibold">Opens<input type="date" value={windowStart} onChange={(e) => setWindowStart(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label><label className="text-sm font-semibold">Closes<input type="date" value={windowEnd} onChange={(e) => setWindowEnd(e.target.value)} className="mt-1 w-full rounded-xl border border-ink/20 bg-white px-4 py-3" /></label></div>}

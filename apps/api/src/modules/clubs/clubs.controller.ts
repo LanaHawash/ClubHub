@@ -1,4 +1,16 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import type { AuthenticatedRequest } from '../auth/jwt-auth.guard';
 import { UpdateClubDto } from './dto/update-club.dto';
 import { ClubsService } from './clubs.service';
@@ -16,6 +28,7 @@ import { InitializeMembershipDto } from './dto/initialize-membership.dto';
 import {
   RegistrationWindowDatesDto,
   UpdateMembershipModeDto,
+  ExtendRegistrationWindowDto,
 } from './dto/manage-registration-window.dto';
 
 @Controller('clubs')
@@ -34,7 +47,10 @@ export class ClubsController {
   @Get('admin/all')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.DEANSHIP)
-  findAllForDeanship(@Query('page') page?: string, @Query('limit') limit?: string) {
+  findAllForDeanship(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
     return this.clubsService.findAllForDeanship(page, limit);
   }
 
@@ -60,14 +76,22 @@ export class ClubsController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.STUDENT)
   getMyAdminAssignments(@Req() request: AuthenticatedRequest) {
-    return this.clubAdminAssignmentsService.getMyAdminAssignments(request.user.id);
+    return this.clubAdminAssignmentsService.getMyAdminAssignments(
+      request.user.id,
+    );
   }
 
   @Get(':id/admin/overview')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.STUDENT)
-  getClubAdminOverview(@Param('id', ParseUUIDPipe) clubId: string, @Req() request: AuthenticatedRequest) {
-    return this.clubAdminAssignmentsService.getClubAdminOverview(clubId, request.user.id);
+  getClubAdminOverview(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.clubAdminAssignmentsService.getClubAdminOverview(
+      clubId,
+      request.user.id,
+    );
   }
 
   @Get(':id/admin-assignments')
@@ -80,21 +104,25 @@ export class ClubsController {
   @Get(':id/eligibility/me')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.STUDENT)
-  async getMyEligibility(@Param('id', ParseUUIDPipe) clubId: string, @Req() request: AuthenticatedRequest) {
-    const eligibility = await this.eligibilityService.evaluateForAccount(request.user.id, clubId);
+  async getMyEligibility(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const eligibility = await this.eligibilityService.evaluateForAccount(
+      request.user.id,
+      clubId,
+    );
     const membership = await this.clubsService.getMembershipQuoteForAccount(
-      request.user.id, clubId, eligibility.eligible,
+      request.user.id,
+      clubId,
+      eligibility.eligible,
     );
     return { ...eligibility, membership };
   }
-@Get(':id/membership/availability')
-getMembershipAvailability(
-  @Param('id', ParseUUIDPipe) clubId: string,
-) {
-  return this.clubsService.getMembershipAvailability(
-    clubId,
-  );
-}
+  @Get(':id/membership/availability')
+  getMembershipAvailability(@Param('id', ParseUUIDPipe) clubId: string) {
+    return this.clubsService.getMembershipAvailability(clubId);
+  }
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.clubsService.findOne(id);
@@ -110,32 +138,55 @@ getMembershipAvailability(
   @Patch(':id/archive')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.DEANSHIP)
-  archive(@Param('id', ParseUUIDPipe) id: string) { return this.clubsService.archive(id); }
+  archive(@Param('id', ParseUUIDPipe) id: string) {
+    return this.clubsService.archive(id);
+  }
 
   @Patch(':id/activate')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.DEANSHIP)
-  activate(@Param('id', ParseUUIDPipe) id: string) { return this.clubsService.activate(id); }
+  activate(@Param('id', ParseUUIDPipe) id: string) {
+    return this.clubsService.activate(id);
+  }
 
   @Patch(':id/supervisor')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.DEANSHIP)
-  assignSupervisor(@Param('id', ParseUUIDPipe) id: string, @Body() dto: AssignSupervisorDto) {
+  assignSupervisor(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AssignSupervisorDto,
+  ) {
     return this.clubsService.assignSupervisor(id, dto.supervisorId);
   }
 
   @Post(':id/admin-assignments')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.DEANSHIP)
-  assignClubAdmin(@Param('id', ParseUUIDPipe) clubId: string, @Body() dto: AssignClubAdminDto, @Req() request: AuthenticatedRequest) {
-    return this.clubAdminAssignmentsService.assignAdmin(clubId, dto, request.user.id);
+  assignClubAdmin(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Body() dto: AssignClubAdminDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.clubAdminAssignmentsService.assignAdmin(
+      clubId,
+      dto,
+      request.user.id,
+    );
   }
 
   @Patch(':id/admin-assignments/:assignmentId/revoke')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(AccountRole.DEANSHIP)
-  revokeClubAdmin(@Param('id', ParseUUIDPipe) clubId: string, @Param('assignmentId', ParseUUIDPipe) assignmentId: string, @Req() request: AuthenticatedRequest) {
-    return this.clubAdminAssignmentsService.revokeAdmin(clubId, assignmentId, request.user.id);
+  revokeClubAdmin(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Param('assignmentId', ParseUUIDPipe) assignmentId: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.clubAdminAssignmentsService.revokeAdmin(
+      clubId,
+      assignmentId,
+      request.user.id,
+    );
   }
 
   @Post(':id/membership/initialize')
@@ -150,63 +201,78 @@ getMembershipAvailability(
   }
 
   @Patch(':id/membership/fees')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.DEANSHIP)
-updateMembershipFees(
-  @Param('id', ParseUUIDPipe) clubId: string,
-  @Body() dto: UpdateMembershipFeesDto,
-  @Req() request: AuthenticatedRequest,
-) {
-  return this.clubsService.updateMembershipFees(
-    clubId,
-    dto,
-    request.user.id,
-  );
-}
-@Patch(':id/membership/mode')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.DEANSHIP)
-updateMembershipMode(
-  @Param('id', ParseUUIDPipe) id: string,
-  @Body() dto: UpdateMembershipModeDto,
-) {
-  return this.clubsService.updateMembershipMode(id, dto);
-}
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  updateMembershipFees(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Body() dto: UpdateMembershipFeesDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.clubsService.updateMembershipFees(clubId, dto, request.user.id);
+  }
+  @Patch(':id/membership/mode')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  updateMembershipMode(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateMembershipModeDto,
+  ) {
+    return this.clubsService.updateMembershipMode(id, dto);
+  }
 
-@Post(':id/membership/windows')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.DEANSHIP)
-createRegistrationWindow(
-  @Param('id', ParseUUIDPipe) id: string,
-  @Body() dto: RegistrationWindowDatesDto,
-) {
-  return this.clubsService.createRegistrationWindow(id, dto);
-}
+  @Post(':id/membership/windows')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  createRegistrationWindow(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RegistrationWindowDatesDto,
+  ) {
+    return this.clubsService.createRegistrationWindow(id, dto);
+  }
 
-@Patch(':id/membership/windows/:windowId')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.DEANSHIP)
-updateRegistrationWindow(
-  @Param('id', ParseUUIDPipe) id: string,
-  @Param('windowId', ParseUUIDPipe) windowId: string,
-  @Body() dto: RegistrationWindowDatesDto,
-) {
-  return this.clubsService.updateRegistrationWindow(
-    id,
-    windowId,
-    dto,
-  );
-}
-@Patch(':id/membership/windows/:windowId/close')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.DEANSHIP)
-closeRegistrationWindow(
-  @Param('id', ParseUUIDPipe) clubId: string,
-  @Param('windowId', ParseUUIDPipe) windowId: string,
-) {
-  return this.clubsService.closeRegistrationWindow(
-    clubId,
-    windowId,
-  );
-}
+  @Patch(':id/membership/windows/:windowId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  updateRegistrationWindow(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('windowId', ParseUUIDPipe) windowId: string,
+    @Body() dto: RegistrationWindowDatesDto,
+  ) {
+    return this.clubsService.updateRegistrationWindow(id, windowId, dto);
+  }
+  @Patch(':id/membership/windows/:windowId/cancel')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  cancelScheduledRegistrationWindow(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Param('windowId', ParseUUIDPipe) windowId: string,
+  ) {
+    return this.clubsService.cancelScheduledRegistrationWindow(
+      clubId,
+      windowId,
+    );
+  }
+  @Patch(':id/membership/windows/:windowId/close')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  closeRegistrationWindow(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Param('windowId', ParseUUIDPipe) windowId: string,
+  ) {
+    return this.clubsService.closeRegistrationWindow(clubId, windowId);
+  }
+  @Patch(':id/membership/windows/:windowId/extend')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(AccountRole.DEANSHIP)
+  extendRegistrationWindow(
+    @Param('id', ParseUUIDPipe) clubId: string,
+    @Param('windowId', ParseUUIDPipe) windowId: string,
+    @Body() dto: ExtendRegistrationWindowDto,
+  ) {
+    return this.clubsService.extendRegistrationWindow(
+      clubId,
+      windowId,
+      dto.closesAt,
+    );
+  }
 }

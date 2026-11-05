@@ -595,3 +595,147 @@ Sprint 5 remains pending formal closeout until:
 - The approved changes are merged into `main`.
 
 **Sprint 6 handoff:** Student membership applications, payment confirmation, membership activation, and related transactional authorization remain future implementation work.
+## Sprint 5 Post-Merge Corrections — Final Verification Addendum
+
+**Date:** 5 November 2026
+**Implementation branch:** `feature/sprint-5-post-merge-fixes`
+**Baseline:** Sprint 5 merged into `main` at commit `74f0d86`
+**Status:** Implementation and targeted local verification complete; pull request, review, and merge pending.
+
+### 1. Correction Summary
+
+Following the Sprint 5 merge, five implementation gaps were corrected.
+
+| Correction | Implemented behavior | Verification |
+|---|---|---|
+| Active registration-window extension | Deanship can extend an actively open window without replacing its record or changing its locked fee version. | PostgreSQL integration tests and browser acceptance passed. |
+| Membership currency labels | Create Club correctly identifies first-time and renewal fees as ILS. | Frontend build passed. |
+| Club-card membership pricing | Club cards retrieve public membership availability and display published prices or applicable registration states. | Frontend build and browser acceptance passed. |
+| Individual scheduled-window cancellation | Deanship can cancel a specific future, unlocked registration window without changing other windows or the club's registration mode. | PostgreSQL integration tests and browser acceptance passed. |
+| Asia/Hebron timezone consistency | Membership registration dates use Palestine-local calendar boundaries regardless of the browser timezone. | Eight permanent timezone tests and browser date-display verification passed. |
+
+### 2. Active Registration-Window Extension
+
+**Endpoint:**
+
+`PATCH /clubs/:id/membership/windows/:windowId/extend`
+
+**Authorization:** Deanship only.
+
+**Request:**
+
+```json
+{
+  "closesAt": "2026-11-20T22:00:00.000Z"
+}
+```
+
+The endpoint updates the closing timestamp of an existing active registration window.
+
+It preserves the window ID, original opening timestamp, and locked membership-fee version.
+
+Extensions are rejected when the window is not eligible, including future, expired, early-closed, archived-club, or overlapping-window scenarios.
+
+The Deanship interface provides an Extend action for eligible active windows.
+
+**Manual acceptance:** An active fixture in `clubhub_test` was successfully extended through the Deanship interface. The resulting PostgreSQL record retained its window identity, active status, locked fee-version reference, and membership prices of 40.00 ILS and 25.00 ILS.
+
+### 3. Individual Scheduled-Window Cancellation
+
+**Endpoint:**
+
+`PATCH /clubs/:id/membership/windows/:windowId/cancel`
+
+**Authorization:** Deanship only.
+
+**Request body:** None.
+
+Cancellation is permitted only for future, unlocked registration windows belonging to active clubs using `WINDOWED` registration mode.
+
+Cancellation sets `canceledAt` without deleting the window.
+
+The operation preserves historical records and does not change other registration windows or the club's registration mode.
+
+Canceled windows do not activate membership fees and do not prevent a replacement window from using the same dates.
+
+**Manual acceptance:** The Deanship successfully canceled one scheduled March 2099 test window. Its status changed to Canceled, while a separate January 2099 window remained Scheduled.
+
+### 4. Membership Registration Timezone
+
+**Authoritative timezone:** `Asia/Hebron`
+
+The frontend uses a shared utility:
+
+`apps/web/src/utils/membershipDates.ts`
+
+Registration opening dates are interpreted as midnight at the beginning of the selected date in Palestine.
+
+Registration closing dates are inclusive in the interface but represented by the exclusive midnight boundary at the beginning of the following Palestine-local calendar day.
+
+Stored API timestamps remain ISO 8601 instants.
+
+The conversion does not depend on the browser's local timezone.
+
+The correction covers club creation, registration-window creation and editing, active-window extension, Deanship date displays, and student-facing registration messages.
+
+**Permanent tests:**
+
+`apps/web/test/membershipDates.test.ts`
+
+Eight automated tests passed, covering seasonal offsets, a daylight-saving transition, inclusive closing dates, invalid calendar dates, and date round trips.
+
+Additional timezone-independence checks produced identical conversion results using Asia/Hebron, Europe/Amsterdam, and America/New_York environments.
+
+### 5. Verification Results
+
+| Verification | Result |
+|---|---|
+| PostgreSQL membership lifecycle integration suite | 36 tests passed |
+| Permanent membership timezone suite | 8 tests passed |
+| Full API Jest suite | Passed |
+| API production build | Passed |
+| Frontend production build | Passed |
+| TypeScript Node test configuration | Passed |
+| `git diff --check` | Passed |
+| Club-card pricing browser acceptance | Passed |
+| Scheduled-window cancellation browser acceptance | Passed |
+| Active-window extension browser acceptance | Passed |
+| Deanship registration-date display | Passed |
+
+These results reflect local development and test environments. They do not represent a production deployment audit.
+
+### 6. Decision Register Updates
+
+**D5-11 — Timezone Consistency**
+
+Status: **IMPLEMENTED AND VERIFIED FOR TESTED SCENARIOS**
+
+Registration-window date conversion now uses `Asia/Hebron` consistently in the implemented frontend surfaces.
+
+**D5-17 — Pull Request and CI Verification**
+
+Status: **OPEN**
+
+Local verification is complete. GitHub pull request review, CI verification, and merge remain pending.
+
+**D5-19 — PostgreSQL Driver Warning**
+
+Status: **OPEN — NON-BLOCKING FOR CURRENT TEST RUNS**
+
+The PostgreSQL driver still reports a deprecation warning concerning concurrent `client.query()` usage.
+
+Tests pass, but this warning requires investigation before upgrading to `pg` version 9.
+
+### 7. Remaining Work and Sprint Boundaries
+
+The post-merge corrections require final documentation review, Git diff review, commit, pull request, CI verification, and merge.
+
+The development environment must be restored to `clubhub_dev` after test-database acceptance work.
+
+Legacy clubs created before mandatory membership configuration must receive their actual membership fees through the Deanship interface.
+
+Sprint 6 remains responsible for membership applications, pending-payment lifecycle, payment confirmation, payment deadlines, cancellation of unpaid applications, and confirmed membership activation.
+
+Sprint 7 remains responsible for membership cards and membership-dependent board and administrator privilege enforcement.
+
+**Conclusion:** The five identified Sprint 5 post-merge corrections have completed implementation and targeted local verification. Formal repository closeout remains pending pull request review and merge.

@@ -22,6 +22,10 @@ import type {
   EffectiveMembershipFees,
   MembershipAvailabilityResult,
 } from './membership-availability.types';
+import {
+  resolveMembershipAction,
+} from '../../shared/membership/membership-action';
+
 @Injectable()
 export class ClubsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -899,7 +903,6 @@ private async getEffectiveMembershipFees(
     effectiveAt: version.effectiveAt,
   };
 }
-/** Sprint 5.E: derive pricing from the existing availability resolver and confirmed history. */
 async getMembershipQuoteForAccount(
   accountId: string,
   clubId: string,
@@ -907,57 +910,208 @@ async getMembershipQuoteForAccount(
 ) {
   const account = await this.prisma.account.findUnique({
     where: { id: accountId },
-    select: { universityStudentId: true },
+    select: {
+      universityStudentId: true,
+    },
   });
+
   if (!account?.universityStudentId) {
-    throw new NotFoundException('Student profile not found.');
+    throw new NotFoundException(
+      'Student profile not found.',
+    );
   }
 
+  const studentId = account.universityStudentId;
   const now = new Date();
-  const [anyConfirmedMembership, activeMembership, availability] =
-    await Promise.all([
-      this.prisma.membership.findFirst({
-        where: {
-          clubId,
-          studentId: account.universityStudentId,
-          activatedAt: { lte: now },
-        },
-        select: { id: true },
-      }),
-      this.prisma.membership.findFirst({
-        where: {
-          clubId,
-          studentId: account.universityStudentId,
-          activatedAt: { lte: now },
-          expiresAt: { gt: now },
-        },
-        select: { id: true, expiresAt: true },
-      }),
-      this.getMembershipAvailability(clubId),
-    ]);
 
-  const canApply = academicallyEligible &&
-    availability.registrationAvailable && !activeMembership;
-  const feeType = !canApply
-    ? null
-    : anyConfirmedMembership ? 'RENEWAL' as const : 'FIRST_TIME' as const;
-  const effectiveFees = availability.effectiveFees;
+  const [
+    anyConfirmedMembership,
+    activeMembership,
+    availability,
+    liveApplication,
+  ] = await Promise.all([
+    this.prisma.membership.findFirst({
+      where: {
+        clubId,
+        studentId,
+      },
+      select: {
+        id: true,
+      },
+    }),
+
+    this.prisma.membership.findFirst({
+      where: {
+        clubId,
+        studentId,
+        activatedAt: { lte: now },
+        expiresAt: { gt: now },
+      },
+      select: {
+        id: true,
+        expiresAt: true,
+        membershipNumber: true,
+        activatedAt: true,
+      },
+    }),
+
+    this.getMembershipAvailability(clubId),
+
+    this.prisma.membershipApplication.findFirst({
+      where: {
+        clubId,
+        studentId,
+        status: {
+          in: [
+            'PENDING_PAYMENT',
+            'PAYMENT_PROCESSING',
+          ],
+        },
+      },
+
+      include: {
+        payments: {
+          where: {
+            status: {
+              in: [
+                'AWAITING_CASH',
+                'PROCESSING',
+              ],
+            },
+          },
+
+          orderBy: {
+            createdAt: 'desc',
+          },
+
+          take: 1,
+        },
+      },
+
+      orderBy: {
+        submittedAt: 'desc',
+      },
+    }),
+  ]);
+
+  const currentPayment =
+    liveApplication?.payments[0] ?? null;
+
+  const pendingApplication = liveApplication
+    ? {
+        id: liveApplication.id,
+
+        kind: liveApplication.kind,
+
+        status: liveApplication.status as
+          | 'PENDING_PAYMENT'
+          | 'PAYMENT_PROCESSING',
+
+        feeType: liveApplication.feeType,
+
+        quotedAmount:
+          liveApplication.quotedAmount.toFixed(2),
+
+        currency: liveApplication.currency,
+
+        feeVersionId: liveApplication.feeVersionId,
+
+        submittedAt: liveApplication.submittedAt,
+
+        paymentDeadlineAt:
+          liveApplication.paymentDeadlineAt,
+
+        processingGraceEndsAt:
+          liveApplication.processingGraceEndsAt,
+
+        nominalDeadlinePassed:
+          now >= liveApplication.paymentDeadlineAt,
+
+        paymentId: currentPayment?.id ?? null,
+
+        paymentMethod:
+          currentPayment?.method ?? null,
+
+        paymentStatus:
+          currentPayment?.status ?? null,
+      }
+    : null;
+
+  const action = resolveMembershipAction({
+    academicallyEligible,
+
+    registrationAvailable:
+      availability.registrationAvailable,
+
+    alreadyActiveMember:
+      Boolean(activeMembership),
+
+    hasPreviousMembership:
+      Boolean(anyConfirmedMembership),
+
+    pendingApplication,
+  });
+
+  const canApply =
+    action === 'APPLY' ||
+    action === 'RENEW';
+
+  const feeType = canApply
+    ? anyConfirmedMembership
+      ? ('RENEWAL' as const)
+      : ('FIRST_TIME' as const)
+    : null;
+
+  const effectiveFees =
+    availability.effectiveFees;
 
   return {
-    registrationAvailable: availability.registrationAvailable,
-    availabilityStatus: availability.status,
-    alreadyActiveMember: Boolean(activeMembership),
-    activeMembershipExpiresAt: activeMembership?.expiresAt ?? null,
-    hasPreviousMembership: Boolean(anyConfirmedMembership),
+    registrationAvailable:
+      availability.registrationAvailable,
+
+    availabilityStatus:
+      availability.status,
+
+    alreadyActiveMember:
+      Boolean(activeMembership),
+
+    activeMembershipExpiresAt:
+      activeMembership?.expiresAt ?? null,
+
+    hasPreviousMembership:
+      Boolean(anyConfirmedMembership),
+
     canApply,
+
     feeType,
-    amount: feeType && effectiveFees
-      ? feeType === 'RENEWAL'
-        ? effectiveFees.renewalFee
-        : effectiveFees.firstTimeFee
-      : null,
-    currency: feeType ? (effectiveFees?.currency ?? null) : null,
-    feeVersionId: feeType ? (effectiveFees?.feeVersionId ?? null) : null,
+
+    amount:
+      feeType && effectiveFees
+        ? feeType === 'RENEWAL'
+          ? effectiveFees.renewalFee
+          : effectiveFees.firstTimeFee
+        : null,
+
+    currency:
+      feeType
+        ? effectiveFees?.currency ?? null
+        : null,
+
+    feeVersionId:
+      feeType
+        ? effectiveFees?.feeVersionId ?? null
+        : null,
+
+    // Sprint 6 additions
+
+    action,
+
+    hasPendingApplication:
+      Boolean(pendingApplication),
+
+    pendingApplication,
+
+    activeMembership,
   };
 }
 async getMembershipAvailability(

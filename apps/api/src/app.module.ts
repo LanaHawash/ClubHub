@@ -10,6 +10,7 @@ import { PrismaModule } from './shared/prisma/prisma.module';
 import { UniversityModule } from './modules/university/university.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ClubsModule } from './modules/clubs/clubs.module';
+import { MembershipApplicationsModule } from './modules/membership-applications/membership-applications.module';
 import { EventsModule } from './modules/events/events.module';
 import { StudentsModule } from './modules/students/students.module';
 import { SupervisorsModule } from './modules/supervisors/supervisors.module';
@@ -32,6 +33,7 @@ import { LabelsModule } from './modules/labels/labels.module';
       },
     ]),
     ClubsModule,
+    MembershipApplicationsModule,
     EventsModule,
   ],
 

@@ -35,6 +35,80 @@ enum MembershipRegistrationMode {
   WINDOWED
 }
 
+enum MembershipApplicationKind {
+  ORDINARY
+  BOARD_ONBOARDING
+}
+
+enum MembershipFeeType {
+  FIRST_TIME
+  RENEWAL
+}
+
+enum MembershipApplicationStatus {
+  PENDING_PAYMENT
+  PAYMENT_PROCESSING
+  PAID
+  EXPIRED
+  CANCELED
+}
+
+enum PaymentMethod {
+  IN_PERSON
+  ONLINE
+}
+
+enum PaymentStatus {
+  AWAITING_CASH
+  PROCESSING
+  CONFIRMED
+  FAILED
+  EXPIRED
+  REFUND_REQUIRED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  MANUAL
+  SIMULATED
+  REAL_GATEWAY
+}
+
+enum PaymentAttemptStatus {
+  INITIATED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  UNKNOWN
+  LATE_SUCCESS_REFUND_REQUIRED
+  REFUNDED
+}
+
+enum BoardNominationStatus {
+  PENDING_PAYMENT
+  PAYMENT_PROCESSING
+  QUALIFIED
+  EXPIRED
+  WITHDRAWN
+}
+
+enum BoardNominationReason {
+  NO_MEMBERSHIP
+  INSUFFICIENT_COVERAGE
+}
+
+enum ApplicationEndReason {
+  TIMEOUT
+  WINDOW_CLOSED
+  EARLY_WINDOW_CLOSE
+  POLICY_SWITCH
+  CLUB_ARCHIVED
+  NOMINATION_TIMEOUT
+  WITHDRAWN
+  PAYMENT_FAILED
+}
+
 model Faculty {
   id          String              @id @default(uuid()) @db.Uuid
   name        String              @unique @db.VarChar(150)
@@ -59,18 +133,20 @@ model Major {
 }
 
 model UniversityStudent {
-  id                String              @id @default(uuid()) @db.Uuid
-  universityId      String              @unique @db.VarChar(20)
-  email             String              @unique @db.VarChar(255)
-  fullName          String              @db.VarChar(150)
-  majorId           String              @db.Uuid
-  major             Major               @relation(fields: [majorId], references: [id], onDelete: Restrict)
-  account           Account?
-  boardAppointments BoardAppointment[]
-  verifications     EmailVerification[]
-  createdAt         DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime            @updatedAt @db.Timestamptz(6)
-  memberships Membership[]
+  id                     String                  @id @default(uuid()) @db.Uuid
+  universityId           String                  @unique @db.VarChar(20)
+  email                  String                  @unique @db.VarChar(255)
+  fullName               String                  @db.VarChar(150)
+  majorId                String                  @db.Uuid
+  major                  Major                   @relation(fields: [majorId], references: [id], onDelete: Restrict)
+  account                Account?
+  boardAppointments      BoardAppointment[]
+  verifications          EmailVerification[]
+  createdAt              DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                @updatedAt @db.Timestamptz(6)
+  memberships            Membership[]
+  membershipApplications MembershipApplication[]
+  boardNominations       BoardNomination[]
 }
 
 model Account {
@@ -91,6 +167,8 @@ model Account {
   clubAdminAssignmentsGranted  ClubAdminAssignment[]      @relation("ClubAdminAssignedBy")
 
   clubAdminAssignmentsRevoked ClubAdminAssignment[] @relation("ClubAdminRevokedBy")
+  confirmedPayments           Payment[]             @relation("PaymentConfirmedBy")
+  boardNominations            BoardNomination[]     @relation("BoardNominatedBy")
   createdAt                   DateTime              @default(now()) @db.Timestamptz(6)
   updatedAt                   DateTime              @updatedAt @db.Timestamptz(6)
 }
@@ -110,32 +188,34 @@ model EmailVerification {
 }
 
 model Club {
-  id                    String                     @id @default(uuid()) @db.Uuid
-  name                  String                     @unique @db.VarChar(150)
-  description           String                     @db.Text
-  logoUrl               String?                    @db.Text
-  classification        ClubClassification
-  facultyId             String?                    @db.Uuid
-  faculty               Faculty?                   @relation(fields: [facultyId], references: [id], onDelete: Restrict)
-  supervisorId          String?                    @db.Uuid
-  supervisor            SupervisorProfile?         @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
-  adminAssignments      ClubAdminAssignment[]
-  boardAppointments     BoardAppointment[]
-  status                ClubStatus                 @default(ACTIVE)
-  foundedYear           Int?
-  contactEmail          String                     @db.VarChar(255)
-  meetingInfo           String?                    @db.Text
-  eligibleMajors        ClubEligibleMajor[]
-  labels                ClubLabel[]
-  events                Event[]
-  membershipSettings    ClubMembershipSettings?
-  membershipFeeVersions ClubMembershipFeeVersion[]
-  registrationWindows   ClubRegistrationWindow[]
-  createdAt             DateTime                   @default(now()) @db.Timestamptz(6)
-  updatedAt             DateTime                   @updatedAt @db.Timestamptz(6)
+  id                     String                     @id @default(uuid()) @db.Uuid
+  name                   String                     @unique @db.VarChar(150)
+  description            String                     @db.Text
+  logoUrl                String?                    @db.Text
+  classification         ClubClassification
+  facultyId              String?                    @db.Uuid
+  faculty                Faculty?                   @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  supervisorId           String?                    @db.Uuid
+  supervisor             SupervisorProfile?         @relation(fields: [supervisorId], references: [id], onDelete: Restrict)
+  adminAssignments       ClubAdminAssignment[]
+  boardAppointments      BoardAppointment[]
+  status                 ClubStatus                 @default(ACTIVE)
+  foundedYear            Int?
+  contactEmail           String                     @db.VarChar(255)
+  meetingInfo            String?                    @db.Text
+  eligibleMajors         ClubEligibleMajor[]
+  labels                 ClubLabel[]
+  events                 Event[]
+  membershipSettings     ClubMembershipSettings?
+  membershipFeeVersions  ClubMembershipFeeVersion[]
+  registrationWindows    ClubRegistrationWindow[]
+  membershipApplications MembershipApplication[]
+  boardNominations       BoardNomination[]
+  createdAt              DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                   @updatedAt @db.Timestamptz(6)
+  memberships            Membership[]
 
   @@index([status, name])
-  memberships Membership[]
 }
 
 model ClubEligibleMajor {
@@ -263,11 +343,11 @@ model EventRegistration {
   status        EventRegistrationStatus @default(CONFIRMED)
   paymentStatus EventPaymentStatus      @default(NOT_REQUIRED)
 
-  amountDue Decimal @default(0) @db.Decimal(10, 2)
-
-  registeredAt DateTime @default(now()) @db.Timestamptz(6)
-  createdAt    DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  amountDue    Decimal   @default(0) @db.Decimal(10, 2)
+  payments     Payment[]
+  registeredAt DateTime  @default(now()) @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
 
   // One registration record per student per event.
   // A cancelled registration can be reactivated later.
@@ -390,9 +470,9 @@ model BoardAppointment {
   student UniversityStudent @relation(fields: [studentId], references: [id], onDelete: Restrict)
 
   adminAssignments ClubAdminAssignment[]
-
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  nomination       BoardNomination?
+  createdAt        DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime              @updatedAt @db.Timestamptz(6)
 
   @@index([clubId, startDate])
   @@index([studentId])
@@ -433,10 +513,10 @@ model ClubMembershipFeeVersion {
   createdById String?  @db.Uuid
   createdBy   Account? @relation(fields: [createdById], references: [id], onDelete: Restrict)
 
-  windows ClubRegistrationWindow[]
-
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  windows      ClubRegistrationWindow[]
+  applications MembershipApplication[]
+  createdAt    DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime                 @updatedAt @db.Timestamptz(6)
 
   @@unique([id, clubId], map: "membership_fee_version_id_club_unique")
   @@index([clubId, effectiveAt])
@@ -451,31 +531,216 @@ model ClubRegistrationWindow {
   opensAt  DateTime @db.Timestamptz(6)
   closesAt DateTime @db.Timestamptz(6)
 
-  closedAt DateTime? @db.Timestamptz(6)
-  canceledAt DateTime? @db.Timestamptz(6)
-  effectiveFeeVersionId String? @db.Uuid
+  closedAt              DateTime? @db.Timestamptz(6)
+  canceledAt            DateTime? @db.Timestamptz(6)
+  effectiveFeeVersionId String?   @db.Uuid
 
   effectiveFeeVersion ClubMembershipFeeVersion? @relation(fields: [effectiveFeeVersionId, clubId], references: [id, clubId], onDelete: Restrict)
-
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  applications        MembershipApplication[]
+  createdAt           DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime                  @updatedAt @db.Timestamptz(6)
 
   @@index([clubId, opensAt])
   @@index([clubId, closesAt])
 }
 
-// Confirmed memberships only. An application is never a membership.
-// Prepared in Sprint 5.E; populated by confirmed payments in Sprint 6.
 model Membership {
-  id          String            @id @default(uuid()) @db.Uuid
-  clubId      String            @db.Uuid
-  club        Club              @relation(fields: [clubId], references: [id], onDelete: Restrict)
-  studentId   String            @db.Uuid
-  student     UniversityStudent @relation(fields: [studentId], references: [id], onDelete: Restrict)
-  activatedAt DateTime          @db.Timestamptz(6)
-  expiresAt   DateTime          @db.Timestamptz(6)
-  createdAt   DateTime          @default(now()) @db.Timestamptz(6)
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId String @db.Uuid
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Restrict)
+
+  studentId String @db.Uuid
+
+  student UniversityStudent @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  membershipNumber String @unique @default(dbgenerated("generate_membership_number()")) @db.VarChar(50)
+
+  sourceApplicationId String? @unique @db.Uuid
+  sourcePaymentId     String? @unique @db.Uuid
+
+  sourceApplication MembershipApplication? @relation(fields: [sourceApplicationId], references: [id], onDelete: Restrict)
+
+  sourcePayment Payment? @relation(fields: [sourcePaymentId], references: [id], onDelete: Restrict)
+
+  activatedAt DateTime @db.Timestamptz(6)
+  expiresAt   DateTime @db.Timestamptz(6)
+
+  confirmedPaymentAt DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   @@index([studentId, clubId, activatedAt])
   @@index([clubId, expiresAt])
+  @@index([clubId, studentId, activatedAt, expiresAt])
+}
+
+model MembershipApplication {
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId    String @db.Uuid
+  studentId String @db.Uuid
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Restrict)
+
+  student UniversityStudent @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  kind   MembershipApplicationKind   @default(ORDINARY)
+  status MembershipApplicationStatus @default(PENDING_PAYMENT)
+
+  boardNominationId String? @unique @db.Uuid
+
+  boardNomination BoardNomination? @relation(fields: [boardNominationId], references: [id], onDelete: Restrict)
+
+  feeType      MembershipFeeType
+  quotedAmount Decimal           @db.Decimal(10, 2)
+  currency     String            @default("ILS") @db.VarChar(3)
+
+  feeVersionId String @db.Uuid
+
+  feeVersion ClubMembershipFeeVersion @relation(fields: [feeVersionId, clubId], references: [id, clubId], onDelete: Restrict)
+
+  registrationWindowId String? @db.Uuid
+
+  registrationWindow ClubRegistrationWindow? @relation(fields: [registrationWindowId], references: [id], onDelete: Restrict)
+
+  registrationModeAtSubmission MembershipRegistrationMode?
+
+  submittedAt           DateTime  @default(now()) @db.Timestamptz(6)
+  paymentDeadlineAt     DateTime  @db.Timestamptz(6)
+  originalDeadlineAt    DateTime  @db.Timestamptz(6)
+  processingGraceEndsAt DateTime? @db.Timestamptz(6)
+
+  paidAt     DateTime?             @db.Timestamptz(6)
+  canceledAt DateTime?             @db.Timestamptz(6)
+  endReason  ApplicationEndReason?
+
+  payments   Payment[]
+  membership Membership?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([studentId, clubId, status])
+  @@index([clubId, status, paymentDeadlineAt])
+  @@index([registrationWindowId, status])
+}
+
+model Payment {
+  id String @id @default(uuid()) @db.Uuid
+
+  membershipApplicationId String? @db.Uuid
+  eventRegistrationId     String? @db.Uuid
+
+  membershipApplication MembershipApplication? @relation(fields: [membershipApplicationId], references: [id], onDelete: Restrict)
+
+  eventRegistration EventRegistration? @relation(fields: [eventRegistrationId], references: [id], onDelete: Restrict)
+
+  method   PaymentMethod
+  provider PaymentProvider
+  status   PaymentStatus
+
+  amount   Decimal @db.Decimal(10, 2)
+  currency String  @default("ILS") @db.VarChar(3)
+
+  referenceKey String @unique @default(uuid()) @db.Uuid
+
+  providerPaymentId String? @db.VarChar(255)
+
+  confirmedAt          DateTime? @db.Timestamptz(6)
+  confirmedByAccountId String?   @db.Uuid
+
+  confirmedBy Account? @relation("PaymentConfirmedBy", fields: [confirmedByAccountId], references: [id], onDelete: Restrict)
+
+  attempts   PaymentAttempt[]
+  membership Membership?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([provider, providerPaymentId])
+  @@index([membershipApplicationId, status])
+  @@index([eventRegistrationId, status])
+  @@index([status, createdAt])
+}
+
+model PaymentAttempt {
+  id String @id @default(uuid()) @db.Uuid
+
+  paymentId String @db.Uuid
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  status   PaymentAttemptStatus @default(INITIATED)
+  provider PaymentProvider
+
+  providerAttemptRef String? @db.VarChar(255)
+  idempotencyKey     String  @unique @db.VarChar(255)
+
+  initiatedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  nominalDeadlineAt     DateTime @db.Timestamptz(6)
+  processingGraceEndsAt DateTime @db.Timestamptz(6)
+
+  providerEventAt DateTime? @db.Timestamptz(6)
+  receivedAt      DateTime? @db.Timestamptz(6)
+
+  failureCode           String? @db.VarChar(100)
+  failureMessageSafe    String? @db.Text
+  providerPayloadDigest String? @db.VarChar(255)
+
+  refundReference String? @db.VarChar(255)
+
+  resolvedAt DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([provider, providerAttemptRef])
+  @@index([paymentId, status])
+  @@index([status, processingGraceEndsAt])
+}
+
+model BoardNomination {
+  id String @id @default(uuid()) @db.Uuid
+
+  clubId    String @db.Uuid
+  studentId String @db.Uuid
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Restrict)
+
+  student UniversityStudent @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  position String @db.VarChar(100)
+
+  proposedStartDate DateTime @db.Date
+  proposedEndDate   DateTime @db.Date
+
+  nominatedById String @db.Uuid
+
+  nominatedBy Account @relation("BoardNominatedBy", fields: [nominatedById], references: [id], onDelete: Restrict)
+
+  nominatedAt DateTime @default(now()) @db.Timestamptz(6)
+  deadlineAt  DateTime @db.Timestamptz(6)
+
+  status BoardNominationStatus @default(PENDING_PAYMENT)
+  reason BoardNominationReason
+
+  qualifiedAt DateTime? @db.Timestamptz(6)
+  expiredAt   DateTime? @db.Timestamptz(6)
+  withdrawnAt DateTime? @db.Timestamptz(6)
+
+  boardAppointmentId String? @unique @db.Uuid
+
+  boardAppointment BoardAppointment? @relation(fields: [boardAppointmentId], references: [id], onDelete: Restrict)
+
+  application MembershipApplication?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([clubId, status, deadlineAt])
+  @@index([studentId, status, deadlineAt])
 }

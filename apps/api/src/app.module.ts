@@ -15,6 +15,7 @@ import { EventsModule } from './modules/events/events.module';
 import { StudentsModule } from './modules/students/students.module';
 import { SupervisorsModule } from './modules/supervisors/supervisors.module';
 import { LabelsModule } from './modules/labels/labels.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { LabelsModule } from './modules/labels/labels.module';
     ]),
     ClubsModule,
     MembershipApplicationsModule,
+    PaymentsModule,
     EventsModule,
   ],
 

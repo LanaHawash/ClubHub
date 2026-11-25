@@ -5,6 +5,7 @@ import {
   calculateEarlyClosureGraceDeadline,
   isBeforeDeadline,
   isMembershipActive,
+  calculateMembershipExpiration,
 } from './membership-time';
 
 describe('Sprint 6 - Membership time calculations', () => {
@@ -134,4 +135,57 @@ describe('Sprint 6 - Membership time calculations', () => {
       ).toBe(false);
     });
   });
+  describe('membership calendar-year expiration', () => {
+  it('adds exactly one calendar year', () => {
+    expect(
+      calculateMembershipExpiration(
+        new Date('2026-11-24T10:30:00.000Z'),
+      ).toISOString(),
+    ).toBe('2027-11-24T10:30:00.000Z');
+  });
+
+  it('preserves hours, minutes, seconds and milliseconds', () => {
+    expect(
+      calculateMembershipExpiration(
+        new Date('2026-06-15T13:45:27.123Z'),
+      ).toISOString(),
+    ).toBe('2027-06-15T13:45:27.123Z');
+  });
+
+  it('clamps February 29 to February 28', () => {
+    expect(
+      calculateMembershipExpiration(
+        new Date('2028-02-29T12:00:00.000Z'),
+      ).toISOString(),
+    ).toBe('2029-02-28T12:00:00.000Z');
+  });
+
+  it('handles a membership spanning a leap year', () => {
+    expect(
+      calculateMembershipExpiration(
+        new Date('2027-03-01T10:00:00.000Z'),
+      ).toISOString(),
+    ).toBe('2028-03-01T10:00:00.000Z');
+  });
+
+  it('does not mutate the original activation date', () => {
+    const activatedAt = new Date(
+      '2026-11-24T10:00:00.000Z',
+    );
+
+    calculateMembershipExpiration(activatedAt);
+
+    expect(activatedAt.toISOString()).toBe(
+      '2026-11-24T10:00:00.000Z',
+    );
+  });
+
+  it('rejects invalid activation dates', () => {
+    expect(() =>
+      calculateMembershipExpiration(
+        new Date('invalid'),
+      ),
+    ).toThrow(RangeError);
+  });
+});
 });

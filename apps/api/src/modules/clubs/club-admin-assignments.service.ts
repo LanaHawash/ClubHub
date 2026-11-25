@@ -8,6 +8,7 @@ import {
 import { AccountRole, AccountStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { AssignClubAdminDto } from './dto/assign-club-admin.dto';
+import type { Prisma } from '../../generated/prisma/client';
 
 @Injectable()
 export class ClubAdminAssignmentsService {
@@ -37,15 +38,34 @@ export class ClubAdminAssignmentsService {
     }
   }
 
-  private async assertActiveStudent(accountId: string) {
-    const account = await this.prisma.account.findUnique({
-      where: { id: accountId },
-      select: { id: true, role: true, status: true, universityStudentId: true },
-    });
-    if (!account || account.role !== AccountRole.STUDENT || account.status !== AccountStatus.ACTIVE || !account.universityStudentId) {
-      throw new ForbiddenException('Only active registered students can access club administration.');
-    }
+  private async assertActiveStudent(
+  accountId: string,
+  db: Prisma.TransactionClient = this.prisma,
+) {
+  const account = await db.account.findUnique({
+    where: {
+      id: accountId,
+    },
+
+    select: {
+      id: true,
+      role: true,
+      status: true,
+      universityStudentId: true,
+    },
+  });
+
+  if (
+    !account ||
+    account.role !== AccountRole.STUDENT ||
+    account.status !== AccountStatus.ACTIVE ||
+    !account.universityStudentId
+  ) {
+    throw new ForbiddenException(
+      'Only active registered students can access club administration.',
+    );
   }
+}
 
   async assignAdmin(clubId: string, dto: AssignClubAdminDto, assignedById: string) {
     await this.assertActiveDeanship(assignedById);
@@ -122,18 +142,46 @@ export class ClubAdminAssignmentsService {
     });
   }
 
-  async assertCanManageClub(clubId: string, accountId: string) {
-    await this.assertActiveStudent(accountId);
-    const assignment = await this.prisma.clubAdminAssignment.findFirst({
+  async assertCanManageClub(
+  clubId: string,
+  accountId: string,
+  db: Prisma.TransactionClient = this.prisma,
+) {
+  await this.assertActiveStudent(
+    accountId,
+    db,
+  );
+
+  const assignment =
+    await db.clubAdminAssignment.findFirst({
       where: {
-        clubId, accountId, revokedAt: null, club: { status: 'ACTIVE' },
-        boardAppointment: { is: this.currentBoardWhere() },
+        clubId,
+        accountId,
+        revokedAt: null,
+
+        club: {
+          status: 'ACTIVE',
+        },
+
+        boardAppointment: {
+          is: this.currentBoardWhere(),
+        },
       },
-      select: { id: true, position: true },
+
+      select: {
+        id: true,
+        position: true,
+      },
     });
-    if (!assignment) throw new ForbiddenException('You do not have administrative access to this club.');
-    return assignment;
+
+  if (!assignment) {
+    throw new ForbiddenException(
+      'You do not have administrative access to this club.',
+    );
   }
+
+  return assignment;
+}
 
   async getClubAdminOverview(clubId: string, accountId: string) {
     const assignment = await this.assertCanManageClub(clubId, accountId);

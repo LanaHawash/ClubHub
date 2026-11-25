@@ -96,3 +96,32 @@ export function isMembershipActive(
     now.getTime() < expiresAt.getTime()
   );
 }
+/**
+ * Adds one calendar year using UTC calendar arithmetic.
+ *
+ * Preserves the activation time and clamps February 29
+ * to February 28 when the following year is not a leap year.
+ */
+export function calculateMembershipExpiration(
+  activatedAt: Date,
+): Date {
+  if (!Number.isFinite(activatedAt.getTime())) {
+    throw new RangeError('Invalid membership activation date.');
+  }
+
+  const expiration = new Date(
+    activatedAt.getTime(),
+  );
+
+  const originalMonth = expiration.getUTCMonth();
+
+  expiration.setUTCFullYear(
+    expiration.getUTCFullYear() + 1,
+  );
+
+  if (expiration.getUTCMonth() !== originalMonth) {
+    expiration.setUTCDate(0);
+  }
+
+  return expiration;
+}

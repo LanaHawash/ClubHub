@@ -31,6 +31,9 @@ import {
 import {
   PaymentConfirmationService,
 } from './payment-confirmation.service';
+import {
+  reconcileApplicationById,
+} from '../../shared/membership/membership-lifecycle';
 
 @Injectable()
 export class PaymentsService {
@@ -472,6 +475,29 @@ export class PaymentsService {
     const application =
       payment.membershipApplication;
 
+      
+      const administratorAccount =
+  await tx.account.findUnique({
+    where: {
+      id: administratorAccountId,
+    },
+
+    select: {
+      universityStudentId: true,
+    },
+  });
+
+if (
+  administratorAccount?.universityStudentId ===
+  application.studentId
+) {
+  throw new ForbiddenException({
+    code: 'SELF_CONFIRMATION_FORBIDDEN',
+
+    message:
+      'Administrators cannot confirm their own membership payments.',
+  });
+}
     const now =
       await getMembershipTransactionTime(tx);
 
@@ -622,6 +648,44 @@ async getPendingCashPayments(
     clubId,
     administratorAccountId,
   );
+  const pendingApplications =
+  await this.prisma.membershipApplication.findMany({
+    where: {
+      clubId,
+
+      kind: 'ORDINARY',
+
+      status: 'PENDING_PAYMENT',
+
+      payments: {
+        some: {
+          method: 'IN_PERSON',
+
+          status: 'AWAITING_CASH',
+        },
+      },
+    },
+
+    select: {
+      id: true,
+    },
+  });
+
+for (const application of pendingApplications) {
+  await reconcileApplicationById(
+    this.prisma,
+    application.id,
+  );
+}
+
+/*
+ * Administrative access could have changed
+ * during reconciliation.
+ */
+await this.adminAssignmentsService.assertCanManageClub(
+  clubId,
+  administratorAccountId,
+);
 
   const now = new Date();
 

@@ -24,12 +24,47 @@ import {
   PaymentConfirmationService,
 } from '../src/modules/payments/payment-confirmation.service';
 import { jest } from '@jest/globals';
+import { ConfigService } from '@nestjs/config';
+
+import { UnauthorizedException } from '@nestjs/common';
+
+import {
+  OnlinePaymentsService,
+} from '../src/modules/payments/online-payments.service';
+
+import {
+  PaymentProviderEventsService,
+} from '../src/modules/payments/payment-provider-events.service';
+
+import {
+  SimulatedPaymentProvider,
+} from '../src/modules/payments/providers/simulated-payment.provider';
+
+import type {
+  ProviderPaymentOutcome,
+} from '../src/modules/payments/providers/payment-provider.interface';
+import {
+  createHmac,
+} from 'node:crypto';
+
+import {
+  PaymentSimulationService,
+} from '../src/modules/payments/payment-simulation.service';
+import {
+  MembershipLifecycleService,
+} from '../src/modules/membership-applications/membership-lifecycle.service';
 describe('Sprint 6.C - Membership applications integration', () => {
   let prisma: PrismaService;
   let clubsService: ClubsService;
   let applicationsService: MembershipApplicationsService;
   let paymentsService: PaymentsService;
+  let onlinePaymentsService: OnlinePaymentsService;
 
+  let providerEventsService: PaymentProviderEventsService;
+
+  let simulatedProvider: SimulatedPaymentProvider;
+
+  const MINUTE_MS = 60 * 1000; 
   const DAY_MS = 24 * 60 * 60 * 1000;
 
   function uniqueSuffix(): string {
@@ -228,6 +263,166 @@ async function createAwaitingCashApplication(
     payment,
   };
 }
+async function createProcessingOnlinePayment(
+  registrationMode:
+    | 'ALWAYS_OPEN'
+    | 'WINDOWED' = 'ALWAYS_OPEN',
+) {
+  const club = await createClub(
+    registrationMode,
+  );
+
+  const { account, student } =
+    await createStudent();
+
+  if (registrationMode === 'WINDOWED') {
+    await createActiveWindow(club.id);
+  }
+
+  const { application } =
+    await applicationsService.createOrdinaryApplication(
+      account.id,
+      club.id,
+    );
+
+  const result =
+    await onlinePaymentsService.initiateOnlinePayment(
+      account.id,
+      application.id,
+    );
+
+  return {
+    club,
+    account,
+    student,
+    application,
+    payment: result.payment,
+    attempt: result.attempt,
+  };
+}
+async function createOnlineProviderEvent(
+  attemptId: string,
+  outcome: ProviderPaymentOutcome,
+  options: {
+    occurredAt?: Date;
+    amount?: string;
+    failureCode?: string;
+  } = {},
+) {
+  const attempt =
+    await prisma.paymentAttempt.findUniqueOrThrow({
+      where: {
+        id: attemptId,
+      },
+
+      include: {
+        payment: true,
+      },
+    });
+
+  if (!attempt.providerAttemptRef) {
+    throw new Error(
+      'Test attempt has no provider reference.',
+    );
+  }
+
+  const clock =
+    await prisma.$queryRaw<{ now: Date }[]>`
+      SELECT clock_timestamp() AS now
+    `;
+
+  return simulatedProvider.createSignedEvent({
+    providerAttemptRef:
+      attempt.providerAttemptRef,
+
+    outcome,
+
+    amount:
+      options.amount ??
+      attempt.payment.amount.toFixed(2),
+
+    currency:
+      attempt.payment.currency,
+
+    occurredAt:
+      options.occurredAt ??
+      clock[0].now,
+
+    failureCode:
+      options.failureCode,
+  });
+}
+async function simulateOnlinePaymentDeadline(
+  applicationId: string,
+  attemptId: string,
+  deadlineMinutesAgo: number,
+) {
+  const clock =
+    await prisma.$queryRaw<{ now: Date }[]>`
+      SELECT clock_timestamp() AS now
+    `;
+
+  const now = clock[0].now;
+
+  const deadline = new Date(
+    now.getTime() -
+      deadlineMinutesAgo * MINUTE_MS,
+  );
+
+  const initiatedAt = new Date(
+    deadline.getTime() -
+      5 * MINUTE_MS,
+  );
+
+  const submittedAt = new Date(
+    deadline.getTime() -
+      14 * DAY_MS,
+  );
+
+  const graceEndsAt = new Date(
+    deadline.getTime() +
+      30 * MINUTE_MS,
+  );
+
+  await prisma.$transaction([
+    prisma.membershipApplication.update({
+      where: {
+        id: applicationId,
+      },
+
+      data: {
+        submittedAt,
+
+        paymentDeadlineAt: deadline,
+
+        originalDeadlineAt: deadline,
+
+        processingGraceEndsAt: graceEndsAt,
+      },
+    }),
+
+    prisma.paymentAttempt.update({
+      where: {
+        id: attemptId,
+      },
+
+      data: {
+        initiatedAt,
+
+        nominalDeadlineAt: deadline,
+
+        processingGraceEndsAt: graceEndsAt,
+      },
+    }),
+  ]);
+
+  return {
+    now,
+    deadline,
+    initiatedAt,
+    graceEndsAt,
+  };
+}
   beforeAll(async () => {
   const url = process.env.DATABASE_URL;
 
@@ -246,6 +441,30 @@ async function createAwaitingCashApplication(
 
   await prisma.$connect();
 
+  const simulationConfig = new ConfigService({
+    SIMULATED_PAYMENT_WEBHOOK_SECRET:
+      'integration-test-only-payment-secret-32-characters',
+  });
+
+  simulatedProvider =
+    new SimulatedPaymentProvider(
+      simulationConfig,
+    );
+
+  onlinePaymentsService =
+    new OnlinePaymentsService(
+      prisma,
+      new ClubEligibilityService(prisma),
+      simulatedProvider,
+    );
+
+  providerEventsService =
+    new PaymentProviderEventsService(
+      prisma,
+      new ClubEligibilityService(prisma),
+      new PaymentConfirmationService(),
+      simulatedProvider,
+    );
   // 2. Initialize the existing club service.
   clubsService = new ClubsService(prisma);
 
@@ -1868,6 +2087,3261 @@ describe('Sprint 6.D - Cash payment confirmation', () => {
     ).not.toBe(
       secondResult.membership.membershipNumber,
     );
+  });
+});
+describe('Sprint 6.E - Online payments', () => {
+
+  // TEST 1
+  it('initiates online payment using the frozen application quote', async () => {
+    const {
+      application,
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    expect(payment.method).toBe('ONLINE');
+
+    expect(payment.provider).toBe('SIMULATED');
+
+    expect(payment.status).toBe('PROCESSING');
+
+    expect(payment.amount).toBe('30.00');
+
+    expect(payment.currency).toBe('ILS');
+
+    expect(attempt.status).toBe('PROCESSING');
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: { id: application.id },
+      });
+
+    expect(storedApplication.status).toBe(
+      'PAYMENT_PROCESSING',
+    );
+
+    expect(
+      storedApplication.processingGraceEndsAt,
+    ).not.toBeNull();
+
+    const memberships =
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      });
+
+    expect(memberships).toBe(0);
+  });
+
+  // TEST 2
+  it('returns the existing attempt when online initiation is repeated', async () => {
+    const {
+      account,
+      application,
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    const repeated =
+      await onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      );
+
+    expect(repeated.existingAttempt).toBe(true);
+
+    expect(repeated.payment.id).toBe(
+      payment.id,
+    );
+
+    expect(repeated.attempt.id).toBe(
+      attempt.id,
+    );
+
+    expect(
+      await prisma.paymentAttempt.count({
+        where: {
+          paymentId: payment.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 3
+  it('prevents duplicate attempts during concurrent online initiation', async () => {
+    const club = await createClub();
+
+    const { account } = await createStudent();
+
+    const { application } =
+      await applicationsService.createOrdinaryApplication(
+        account.id,
+        club.id,
+      );
+
+    const results = await Promise.all([
+      onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      ),
+
+      onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      ),
+    ]);
+
+    expect(results[0].payment.id).toBe(
+      results[1].payment.id,
+    );
+
+    expect(results[0].attempt.id).toBe(
+      results[1].attempt.id,
+    );
+
+    expect(
+      results.filter(
+        result => !result.existingAttempt,
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      await prisma.paymentAttempt.count({
+        where: {
+          paymentId: results[0].payment.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 4
+  it('prevents another student from initiating online payment', async () => {
+    const { application } =
+      await createProcessingOnlinePayment();
+
+    const anotherStudent =
+      await createStudent();
+
+    await expect(
+      onlinePaymentsService.initiateOnlinePayment(
+        anotherStudent.account.id,
+        application.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  // TEST 5
+  it('rejects online initiation while cash payment is awaiting confirmation', async () => {
+    const {
+      account,
+      application,
+    } = await createAwaitingCashApplication();
+
+    await expect(
+      onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code: 'PAYMENT_METHOD_ALREADY_SELECTED',
+      },
+    });
+  });
+
+  // TEST 6
+  it('activates membership after a verified successful online payment', async () => {
+    const {
+      club,
+      student,
+      payment,
+      application,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: { id: application.id },
+      });
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: { id: attempt.id },
+      });
+
+    const membership =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(storedApplication.status).toBe(
+      'PAID',
+    );
+
+    expect(storedAttempt.status).toBe(
+      'SUCCEEDED',
+    );
+
+    expect(membership.clubId).toBe(
+      club.id,
+    );
+
+    expect(membership.studentId).toBe(
+      student.id,
+    );
+
+    expect(membership.sourcePaymentId).toBe(
+      payment.id,
+    );
+
+    expect(membership.membershipNumber).toMatch(
+      /^CH-\d{4}-\d{6,}$/,
+    );
+  });
+
+  // TEST 7
+  it('records the verified provider timestamp as payment confirmation time', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      );
+
+    const verified =
+      simulatedProvider.verifyEvent(event);
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    const membership =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      });
+
+    expect(storedPayment.confirmedAt).toEqual(
+      verified.occurredAt,
+    );
+
+    expect(membership.activatedAt).toEqual(
+      verified.occurredAt,
+    );
+
+    expect(membership.confirmedPaymentAt).toEqual(
+      verified.occurredAt,
+    );
+  });
+
+  // TEST 8
+  it('does not record a human administrator as the online payment confirmer', async () => {
+    const {
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const stored =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    expect(stored.status).toBe('CONFIRMED');
+
+    expect(stored.confirmedByAccountId).toBeNull();
+  });
+
+  // TEST 9
+  it('rejects callbacks with invalid provider signatures', async () => {
+    const {
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      );
+
+    await expect(
+      providerEventsService.processSignedEvent({
+        ...event,
+
+        signature: '0'.repeat(64),
+      }),
+    ).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+
+    expect(
+      await prisma.paymentProviderEvent.count({
+        where: {
+          paymentAttemptId: attempt.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 10
+  it('rejects a correctly signed event containing an incorrect payment amount', async () => {
+    const {
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+        {
+          amount: '1.00',
+        },
+      );
+
+    await expect(
+      providerEventsService.processSignedEvent(
+        event,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code: 'PAYMENT_AMOUNT_MISMATCH',
+      },
+    });
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 11
+  it('deduplicates repeated delivery of the same provider event', async () => {
+    const {
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      );
+
+    const first =
+      await providerEventsService.processSignedEvent(
+        event,
+      );
+
+    const second =
+      await providerEventsService.processSignedEvent(
+        event,
+      );
+
+    expect(first.duplicate).toBe(false);
+
+    expect(second.duplicate).toBe(true);
+
+    expect(
+      await prisma.paymentProviderEvent.count({
+        where: {
+          paymentAttemptId: attempt.id,
+        },
+      }),
+    ).toBe(1);
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 12
+  it('handles concurrent delivery of the same successful callback', async () => {
+    const {
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      );
+
+    const results = await Promise.all([
+      providerEventsService.processSignedEvent(
+        event,
+      ),
+
+      providerEventsService.processSignedEvent(
+        event,
+      ),
+    ]);
+
+    expect(
+      results.filter(
+        result => result.duplicate,
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      await prisma.paymentProviderEvent.count({
+        where: {
+          paymentAttemptId: attempt.id,
+        },
+      }),
+    ).toBe(1);
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 13
+  it('returns the original application to pending payment after definitive failure', async () => {
+    const {
+      application,
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'FAILED',
+        {
+          failureCode: 'SIMULATED_DECLINE',
+        },
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: { id: application.id },
+      });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: { id: attempt.id },
+      });
+
+    expect(storedApplication.status).toBe(
+      'PENDING_PAYMENT',
+    );
+
+    expect(storedPayment.status).toBe(
+      'FAILED',
+    );
+
+    expect(storedAttempt.status).toBe(
+      'FAILED',
+    );
+
+    expect(storedAttempt.failureCode).toBe(
+      'SIMULATED_DECLINE',
+    );
+
+    expect(
+      storedApplication.processingGraceEndsAt,
+    ).toBeNull();
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 14
+  it('creates a new attempt while retaining the original application and payment after failure', async () => {
+    const {
+      account,
+      application,
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    const failedEvent =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'FAILED',
+      );
+
+    await providerEventsService.processSignedEvent(
+      failedEvent,
+    );
+
+    const retry =
+      await onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      );
+
+    expect(retry.payment.id).toBe(
+      payment.id,
+    );
+
+    expect(retry.attempt.id).not.toBe(
+      attempt.id,
+    );
+
+    expect(retry.payment.amount).toBe(
+      '30.00',
+    );
+
+    expect(retry.applicationStatus).toBe(
+      'PAYMENT_PROCESSING',
+    );
+
+    const attempts =
+      await prisma.paymentAttempt.findMany({
+        where: {
+          paymentId: payment.id,
+        },
+      });
+
+    expect(attempts).toHaveLength(2);
+
+    expect(
+      attempts.some(
+        item => item.status === 'FAILED',
+      ),
+    ).toBe(true);
+
+    expect(
+      attempts.some(
+        item => item.status === 'PROCESSING',
+      ),
+    ).toBe(true);
+  });
+
+  // TEST 15
+  it('activates membership after a successful retry', async () => {
+    const {
+      account,
+      application,
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'FAILED',
+      ),
+    );
+
+    const retry =
+      await onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        retry.attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const membership =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      });
+
+    expect(membership.sourcePaymentId).toBe(
+      payment.id,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 16
+  it('keeps an unknown provider outcome unresolved and prevents new attempts', async () => {
+    const {
+      account,
+      application,
+      payment,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'UNKNOWN',
+      ),
+    );
+
+    const repeated =
+      await onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      );
+
+    expect(repeated.existingAttempt).toBe(true);
+
+    expect(repeated.attempt.id).toBe(
+      attempt.id,
+    );
+
+    expect(repeated.attempt.status).toBe(
+      'UNKNOWN',
+    );
+
+    expect(
+      await prisma.paymentAttempt.count({
+        where: {
+          paymentId: payment.id,
+        },
+      }),
+    ).toBe(1);
+
+    await expect(
+      paymentsService.selectCashPayment(
+        account.id,
+        application.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  // TEST 17
+  it('allows an unknown attempt to resolve successfully through a verified event', async () => {
+    const {
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'UNKNOWN',
+      ),
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: { id: attempt.id },
+      });
+
+    expect(storedAttempt.status).toBe(
+      'SUCCEEDED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 18
+  it('sets the online processing grace cutoff exactly 30 minutes after the nominal deadline', async () => {
+    const {
+      application,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    expect(
+      attempt.processingGraceEndsAt.getTime() -
+      attempt.nominalDeadlineAt.getTime(),
+    ).toBe(30 * MINUTE_MS);
+
+    expect(
+      attempt.nominalDeadlineAt,
+    ).toEqual(
+      application.paymentDeadlineAt,
+    );
+  });
+
+  // TEST 19
+  it('accepts a verified online success occurring within the grace period', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        10,
+      );
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+        {
+          occurredAt: timing.now,
+        },
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    expect(storedPayment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 20
+  it('accepts an in-time provider success delivered after the grace cutoff while the attempt remains unresolved', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    const occurredAt = new Date(
+      timing.graceEndsAt.getTime() -
+        MINUTE_MS,
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+        {
+          occurredAt,
+        },
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    expect(storedPayment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(storedPayment.confirmedAt).toEqual(
+      occurredAt,
+    );
+  });
+
+  // TEST 21
+  it('marks a success occurring after the grace cutoff as refund required', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+        {
+          occurredAt: timing.now,
+        },
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: { id: attempt.id },
+      });
+
+    expect(storedPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(storedAttempt.status).toBe(
+      'LATE_SUCCESS_REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+
+    const ledgerEvent =
+      await prisma.paymentProviderEvent.findFirstOrThrow({
+        where: {
+          paymentAttemptId: attempt.id,
+        },
+      });
+
+    expect(ledgerEvent.status).toBe(
+      'RECONCILIATION_REQUIRED',
+    );
+  });
+
+  // TEST 22
+  it('rejects membership activation when success occurs exactly at the exclusive grace cutoff', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+        {
+          occurredAt:
+            timing.graceEndsAt,
+        },
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    expect(storedPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 23
+  it('prevents retry after a definitive failure received after the application deadline', async () => {
+    const {
+      account,
+      application,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    await simulateOnlinePaymentDeadline(
+      application.id,
+      attempt.id,
+      10,
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'FAILED',
+      ),
+    );
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: { id: application.id },
+      });
+
+    expect(storedApplication.status).toBe(
+      'EXPIRED',
+    );
+
+    await expect(
+      onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  // TEST 24
+  it('changes the student membership action from PAYMENT_PROCESSING to ACTIVE_MEMBER', async () => {
+    const {
+      club,
+      account,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    const before =
+      await clubsService.getMembershipQuoteForAccount(
+        account.id,
+        club.id,
+        true,
+      );
+
+    expect(before.action).toBe(
+      'PAYMENT_PROCESSING',
+    );
+
+    expect(before.canApply).toBe(false);
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const after =
+      await clubsService.getMembershipQuoteForAccount(
+        account.id,
+        club.id,
+        true,
+      );
+
+    expect(after.action).toBe(
+      'ACTIVE_MEMBER',
+    );
+
+    expect(after.hasPendingApplication).toBe(
+      false,
+    );
+
+    expect(after.activeMembership).not.toBeNull();
+  });
+
+  // TEST 25
+  it('requires refund reconciliation when an online payment succeeds after the club is archived', async () => {
+    const {
+      club,
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    await clubsService.archive(club.id);
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+    expect(storedPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+});
+describe('Sprint 6.E - Payment hardening', () => {
+  // TEST 1
+  it('prevents an authorized administrator from confirming their own cash payment', async () => {
+    const club = await createClub();
+
+    const administrator =
+      await createClubAdministrator(club.id);
+
+    const { application } =
+      await applicationsService.createOrdinaryApplication(
+        administrator.account.id,
+        club.id,
+      );
+
+    const { payment } =
+      await paymentsService.selectCashPayment(
+        administrator.account.id,
+        application.id,
+      );
+
+    await expect(
+      paymentsService.confirmCashPayment(
+        administrator.account.id,
+        club.id,
+        payment.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 403,
+
+      response: {
+        code: 'SELF_CONFIRMATION_FORBIDDEN',
+      },
+    });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'AWAITING_CASH',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 2
+  it('allows another administrator to confirm an administrator membership payment', async () => {
+    const club = await createClub();
+
+    const president =
+      await createClubAdministrator(
+        club.id,
+        'PRESIDENT',
+      );
+
+    const secondAdmin =
+      await createClubAdministrator(
+        club.id,
+        'SECOND_ADMIN',
+      );
+
+    const { application } =
+      await applicationsService.createOrdinaryApplication(
+        president.account.id,
+        club.id,
+      );
+
+    const { payment } =
+      await paymentsService.selectCashPayment(
+        president.account.id,
+        application.id,
+      );
+
+    const result =
+      await paymentsService.confirmCashPayment(
+        secondAdmin.account.id,
+        club.id,
+        payment.id,
+      );
+
+    expect(result.payment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(
+      result.payment.confirmedByAccountId,
+    ).toBe(secondAdmin.account.id);
+
+    expect(result.membership.studentId).toBe(
+      president.student.id,
+    );
+  });
+
+  // TEST 3
+  it('does not reverse a confirmed membership after a later failure event', async () => {
+    const {
+      payment,
+      application,
+      attempt,
+    } = await createProcessingOnlinePayment();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'FAILED',
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: {
+          id: attempt.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(storedAttempt.status).toBe(
+      'SUCCEEDED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 4
+  it('isolates a late success from an older failed attempt', async () => {
+    const {
+      account,
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'FAILED',
+      ),
+    );
+
+    const retry =
+      await onlinePaymentsService.initiateOnlinePayment(
+        account.id,
+        application.id,
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const oldAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: {
+          id: attempt.id,
+        },
+      });
+
+    const newAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: {
+          id: retry.attempt.id,
+        },
+      });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(oldAttempt.status).toBe(
+      'LATE_SUCCESS_REFUND_REQUIRED',
+    );
+
+    expect(newAttempt.status).toBe(
+      'PROCESSING',
+    );
+
+    expect(storedPayment.status).toBe(
+      'PROCESSING',
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        retry.attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 5
+  it('rejects the same provider event ID with a different signed payload', async () => {
+    const first =
+      await createProcessingOnlinePayment();
+
+    const second =
+      await createProcessingOnlinePayment();
+
+    const firstEvent =
+      await createOnlineProviderEvent(
+        first.attempt.id,
+        'SUCCEEDED',
+      );
+
+    const secondEvent =
+      await createOnlineProviderEvent(
+        second.attempt.id,
+        'SUCCEEDED',
+      );
+
+    const firstPayload =
+      JSON.parse(firstEvent.payload);
+
+    const secondPayload =
+      JSON.parse(secondEvent.payload);
+
+    secondPayload.providerEventId =
+      firstPayload.providerEventId;
+
+    const modifiedPayload =
+      JSON.stringify(secondPayload);
+
+    const signature = createHmac(
+      'sha256',
+      'integration-test-only-payment-secret-32-characters',
+    )
+      .update(modifiedPayload, 'utf8')
+      .digest('hex');
+
+    await providerEventsService.processSignedEvent(
+      firstEvent,
+    );
+
+    await expect(
+      providerEventsService.processSignedEvent({
+        payload: modifiedPayload,
+        signature,
+      }),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            second.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 6
+  it('serializes conflicting concurrent provider event identities across clubs', async () => {
+    const first =
+      await createProcessingOnlinePayment();
+
+    const second =
+      await createProcessingOnlinePayment();
+
+    const firstEvent =
+      await createOnlineProviderEvent(
+        first.attempt.id,
+        'SUCCEEDED',
+      );
+
+    const secondEvent =
+      await createOnlineProviderEvent(
+        second.attempt.id,
+        'SUCCEEDED',
+      );
+
+    const firstPayload =
+      JSON.parse(firstEvent.payload);
+
+    const secondPayload =
+      JSON.parse(secondEvent.payload);
+
+    secondPayload.providerEventId =
+      firstPayload.providerEventId;
+
+    const modifiedPayload =
+      JSON.stringify(secondPayload);
+
+    const signature = createHmac(
+      'sha256',
+      'integration-test-only-payment-secret-32-characters',
+    )
+      .update(modifiedPayload, 'utf8')
+      .digest('hex');
+
+    const results = await Promise.allSettled([
+      providerEventsService.processSignedEvent(
+        firstEvent,
+      ),
+
+      providerEventsService.processSignedEvent({
+        payload: modifiedPayload,
+        signature,
+      }),
+    ]);
+
+    const successful = results.filter(
+      result => result.status === 'fulfilled',
+    );
+
+    const rejected = results.filter(
+      result => result.status === 'rejected',
+    );
+
+    expect(successful).toHaveLength(1);
+
+    expect(rejected).toHaveLength(1);
+
+    if (rejected[0].status === 'rejected') {
+      expect(rejected[0].reason).toBeInstanceOf(
+        ConflictException,
+      );
+    }
+
+    expect(
+      await prisma.paymentProviderEvent.count({
+        where: {
+          provider: 'SIMULATED',
+
+          providerEventId:
+            firstPayload.providerEventId,
+        },
+      }),
+    ).toBe(1);
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: {
+            in: [
+              first.application.id,
+              second.application.id,
+            ],
+          },
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 7
+  it('requires refund reconciliation after an early-closure grace cutoff', async () => {
+  const club = await createClub('WINDOWED');
+
+  const { account } = await createStudent();
+
+  const scheduledWindow =
+    await prisma.clubRegistrationWindow.findFirstOrThrow({
+      where: {
+        clubId: club.id,
+      },
+    });
+
+  const clock =
+    await prisma.$queryRaw<{ now: Date }[]>`
+      SELECT clock_timestamp() AS now
+    `;
+
+  const now = clock[0].now;
+
+  /*
+   * Configure the historical opening time while
+   * the registration window is still scheduled.
+   *
+   * Do not modify opensAt after it becomes active.
+   */
+  const window =
+    await prisma.clubRegistrationWindow.update({
+      where: {
+        id: scheduledWindow.id,
+      },
+
+      data: {
+        opensAt: new Date(
+          now.getTime() - 120 * MINUTE_MS,
+        ),
+
+        closesAt: new Date(
+          now.getTime() + 60 * MINUTE_MS,
+        ),
+      },
+    });
+
+  const { application } =
+    await applicationsService.createOrdinaryApplication(
+      account.id,
+      club.id,
+    );
+
+  const { payment, attempt } =
+    await onlinePaymentsService.initiateOnlinePayment(
+      account.id,
+      application.id,
+    );
+
+  /*
+   * Simulate a payment initiated before
+   * an early registration closure.
+   */
+  const historicalSubmission = new Date(
+    now.getTime() - 60 * MINUTE_MS,
+  );
+
+  const historicalInitiation = new Date(
+    now.getTime() - 45 * MINUTE_MS,
+  );
+
+  const earlyClosedAt = new Date(
+    now.getTime() - 35 * MINUTE_MS,
+  );
+
+  const earlyGraceCutoff = new Date(
+    earlyClosedAt.getTime() + 30 * MINUTE_MS,
+  );
+
+  await prisma.$transaction([
+    prisma.membershipApplication.update({
+      where: {
+        id: application.id,
+      },
+
+      data: {
+        submittedAt: historicalSubmission,
+      },
+    }),
+
+    prisma.paymentAttempt.update({
+      where: {
+        id: attempt.id,
+      },
+
+      data: {
+        initiatedAt: historicalInitiation,
+      },
+    }),
+
+    prisma.clubRegistrationWindow.update({
+      where: {
+        id: window.id,
+      },
+
+      data: {
+        closedAt: earlyClosedAt,
+      },
+    }),
+  ]);
+
+  const event =
+    await createOnlineProviderEvent(
+      attempt.id,
+      'SUCCEEDED',
+      {
+        occurredAt: now,
+      },
+    );
+
+  /*
+   * Prove the success is before the original grace
+   * cutoff but after the shortened early-closure cutoff.
+   */
+  expect(now.getTime()).toBeLessThan(
+    attempt.processingGraceEndsAt.getTime(),
+  );
+
+  expect(now.getTime()).toBeGreaterThanOrEqual(
+    earlyGraceCutoff.getTime(),
+  );
+
+  await providerEventsService.processSignedEvent(
+    event,
+  );
+
+  const storedPayment =
+    await prisma.payment.findUniqueOrThrow({
+      where: {
+        id: payment.id,
+      },
+    });
+
+  const storedAttempt =
+    await prisma.paymentAttempt.findUniqueOrThrow({
+      where: {
+        id: attempt.id,
+      },
+    });
+
+  const ledgerEvent =
+    await prisma.paymentProviderEvent.findFirstOrThrow({
+      where: {
+        paymentAttemptId: attempt.id,
+      },
+    });
+
+  expect(storedPayment.status).toBe(
+    'REFUND_REQUIRED',
+  );
+
+  expect(storedAttempt.status).toBe(
+    'LATE_SUCCESS_REFUND_REQUIRED',
+  );
+
+  expect(ledgerEvent.status).toBe(
+    'RECONCILIATION_REQUIRED',
+  );
+
+  expect(
+    await prisma.membership.count({
+      where: {
+        sourceApplicationId: application.id,
+      },
+    }),
+  ).toBe(0);
+});
+
+  // TEST 8
+  it('allows Deanship to simulate a verified payment in a test environment', async () => {
+    const {
+      club,
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const administrator =
+      await createClubAdministrator(club.id);
+
+    const simulationService =
+      new PaymentSimulationService(
+        prisma,
+
+        new ConfigService({
+          NODE_ENV: 'test',
+
+          ENABLE_PAYMENT_SIMULATION: 'true',
+        }),
+
+        simulatedProvider,
+        providerEventsService,
+      );
+
+    await simulationService.simulateOutcome(
+      administrator.deanship.id,
+      attempt.id,
+      'SUCCEEDED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 9
+  it('prevents students from generating simulated payment success', async () => {
+    const {
+      account,
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const simulationService =
+      new PaymentSimulationService(
+        prisma,
+
+        new ConfigService({
+          NODE_ENV: 'test',
+
+          ENABLE_PAYMENT_SIMULATION: 'true',
+        }),
+
+        simulatedProvider,
+        providerEventsService,
+      );
+
+    await expect(
+      simulationService.simulateOutcome(
+        account.id,
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    ).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 10
+  it('disables payment simulation in production even when enabled explicitly', async () => {
+    const {
+      club,
+      attempt,
+      application,
+    } = await createProcessingOnlinePayment();
+
+    const administrator =
+      await createClubAdministrator(club.id);
+
+    const simulationService =
+      new PaymentSimulationService(
+        prisma,
+
+        new ConfigService({
+          NODE_ENV: 'production',
+
+          ENABLE_PAYMENT_SIMULATION: 'true',
+        }),
+
+        simulatedProvider,
+        providerEventsService,
+      );
+
+    await expect(
+      simulationService.simulateOutcome(
+        administrator.deanship.id,
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    ).rejects.toMatchObject({
+      status: 404,
+    });
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+});
+describe('Sprint 6.F - Application lifecycle reconciliation', () => {
+  async function makeApplicationOverdue(
+    applicationId: string,
+  ) {
+    const deadline = new Date(
+      Date.now() - MINUTE_MS,
+    );
+
+    return prisma.membershipApplication.update({
+      where: {
+        id: applicationId,
+      },
+
+      data: {
+        submittedAt: new Date(
+          deadline.getTime() - 14 * DAY_MS,
+        ),
+
+        paymentDeadlineAt: deadline,
+
+        originalDeadlineAt: deadline,
+      },
+    });
+  }
+
+  // TEST 1
+  it('preserves an application before its payment deadline', async () => {
+    const club = await createClub();
+
+    const { account } = await createStudent();
+
+    const { application } =
+      await applicationsService.createOrdinaryApplication(
+        account.id,
+        club.id,
+      );
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    const result =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(result?.changed).toBe(false);
+
+    expect(result?.status).toBe(
+      'PENDING_PAYMENT',
+    );
+  });
+
+  // TEST 2
+  it('expires an unpaid ordinary application after its deadline', async () => {
+    const club = await createClub();
+
+    const { account } = await createStudent();
+
+    const { application } =
+      await applicationsService.createOrdinaryApplication(
+        account.id,
+        club.id,
+      );
+
+    await makeApplicationOverdue(
+      application.id,
+    );
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    const result =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(result?.changed).toBe(true);
+
+    expect(result?.status).toBe('EXPIRED');
+
+    expect(result?.endReason).toBe('TIMEOUT');
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe('EXPIRED');
+  });
+
+  // TEST 3
+  it('expires the associated awaiting-cash payment', async () => {
+    const { application, payment } =
+      await createAwaitingCashApplication();
+
+    await makeApplicationOverdue(
+      application.id,
+    );
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    await lifecycleService.reconcileApplication(
+      application.id,
+    );
+
+    const stored =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(stored.status).toBe('EXPIRED');
+
+    expect(stored.confirmedAt).toBeNull();
+  });
+
+  // TEST 4
+  it('allows a new first-time application after an unpaid application expires', async () => {
+    const club = await createClub();
+
+    const { account, student } =
+      await createStudent();
+
+    const first =
+      await applicationsService.createOrdinaryApplication(
+        account.id,
+        club.id,
+      );
+
+    await makeApplicationOverdue(
+      first.application.id,
+    );
+
+    const second =
+      await applicationsService.createOrdinaryApplication(
+        account.id,
+        club.id,
+      );
+
+    expect(second.application.id).not.toBe(
+      first.application.id,
+    );
+
+    expect(second.application.feeType).toBe(
+      'FIRST_TIME',
+    );
+
+    const applications =
+      await prisma.membershipApplication.findMany({
+        where: {
+          clubId: club.id,
+
+          studentId: student.id,
+        },
+      });
+
+    expect(applications).toHaveLength(2);
+
+    expect(
+      applications.find(
+        item => item.id === first.application.id,
+      )?.status,
+    ).toBe('EXPIRED');
+
+    expect(
+      applications.find(
+        item => item.id === second.application.id,
+      )?.status,
+    ).toBe('PENDING_PAYMENT');
+  });
+
+  // TEST 5
+  it('preserves an online processing application within its permitted grace period', async () => {
+    const { application, attempt, payment } =
+      await createProcessingOnlinePayment();
+
+    await simulateOnlinePaymentDeadline(
+      application.id,
+      attempt.id,
+      10,
+    );
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    const result =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(result?.changed).toBe(false);
+
+    expect(result?.status).toBe(
+      'PAYMENT_PROCESSING',
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'PROCESSING',
+    );
+  });
+
+  // TEST 6
+  it('expires an unresolved online application after the processing grace cutoff', async () => {
+    const { application, attempt, payment } =
+      await createProcessingOnlinePayment();
+
+    await simulateOnlinePaymentDeadline(
+      application.id,
+      attempt.id,
+      40,
+    );
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    const result =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(result?.status).toBe('EXPIRED');
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: {
+          id: attempt.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(storedAttempt.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 7
+  it('makes repeated expiration reconciliation idempotent', async () => {
+    const { application } =
+      await createAwaitingCashApplication();
+
+    await makeApplicationOverdue(
+      application.id,
+    );
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    const first =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    const second =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(first?.changed).toBe(true);
+
+    expect(second?.changed).toBe(false);
+
+    expect(second?.status).toBe('EXPIRED');
+  });
+
+  // TEST 8
+ it('atomically cancels an unpaid application when the club is archived', async () => {
+  const {
+    club,
+    application,
+    payment,
+  } = await createAwaitingCashApplication();
+
+  await clubsService.archive(club.id);
+
+  /*
+   * No manual reconciliation should be required.
+   */
+  const storedApplication =
+    await prisma.membershipApplication.findUniqueOrThrow({
+      where: {
+        id: application.id,
+      },
+    });
+
+  const storedPayment =
+    await prisma.payment.findUniqueOrThrow({
+      where: {
+        id: payment.id,
+      },
+    });
+
+  expect(storedApplication.status).toBe(
+    'CANCELED',
+  );
+
+  expect(storedApplication.endReason).toBe(
+    'CLUB_ARCHIVED',
+  );
+
+  expect(storedApplication.canceledAt).not.toBeNull();
+
+  expect(storedPayment.status).toBe(
+    'EXPIRED',
+  );
+});
+
+  // TEST 9
+  it('does not restore a canceled application when the club is reactivated', async () => {
+    const { club, application } =
+      await createAwaitingCashApplication();
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    await clubsService.archive(club.id);
+
+   
+
+    await clubsService.activate(club.id);
+
+    const result =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(result?.changed).toBe(false);
+
+    expect(result?.status).toBe('CANCELED');
+  });
+
+  // TEST 10
+  it('never expires an already paid membership application', async () => {
+    const { club, application, payment } =
+      await createAwaitingCashApplication();
+
+    const administrator =
+      await createClubAdministrator(club.id);
+
+    await paymentsService.confirmCashPayment(
+      administrator.account.id,
+      club.id,
+      payment.id,
+    );
+
+    await clubsService.archive(club.id);
+
+    const lifecycleService =
+      new MembershipLifecycleService(prisma);
+
+    const result =
+      await lifecycleService.reconcileApplication(
+        application.id,
+      );
+
+    expect(result?.changed).toBe(false);
+
+    expect(result?.status).toBe('PAID');
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId: application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+});
+describe('Sprint 6.F - Administrative lifecycle integration', () => {
+  // TEST 1
+  it('extends the deadline of an unpaid application without changing its fee snapshot', async () => {
+    const {
+      club,
+      application,
+      payment,
+    } = await createAwaitingCashApplication(
+      'WINDOWED',
+    );
+
+    const newDeadline = new Date(
+      application.paymentDeadlineAt.getTime() +
+        DAY_MS,
+    );
+
+    await clubsService.extendRegistrationWindow(
+      club.id,
+      application.registrationWindowId!,
+      newDeadline.toISOString(),
+    );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.paymentDeadlineAt).toEqual(
+      newDeadline,
+    );
+
+    expect(stored.originalDeadlineAt).toEqual(
+      application.originalDeadlineAt,
+    );
+
+    expect(stored.feeVersionId).toBe(
+      application.feeVersionId,
+    );
+
+    expect(stored.quotedAmount.toFixed(2)).toBe(
+      '30.00',
+    );
+
+    expect(stored.status).toBe(
+      'PENDING_PAYMENT',
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'AWAITING_CASH',
+    );
+
+    expect(storedPayment.amount.toFixed(2)).toBe(
+      '30.00',
+    );
+  });
+
+  // TEST 2
+  it('extends a processing online attempt and its grace cutoff', async () => {
+    const {
+      club,
+      application,
+      attempt,
+    } = await createProcessingOnlinePayment(
+      'WINDOWED',
+    );
+
+    const newDeadline = new Date(
+      application.paymentDeadlineAt.getTime() +
+        DAY_MS,
+    );
+
+    await clubsService.extendRegistrationWindow(
+      club.id,
+      application.registrationWindowId!,
+      newDeadline.toISOString(),
+    );
+
+    const expectedGrace = new Date(
+      newDeadline.getTime() +
+        30 * MINUTE_MS,
+    );
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    const storedAttempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: {
+          id: attempt.id,
+        },
+      });
+
+    expect(
+      storedApplication.paymentDeadlineAt,
+    ).toEqual(newDeadline);
+
+    expect(
+      storedApplication.processingGraceEndsAt,
+    ).toEqual(expectedGrace);
+
+    expect(
+      storedAttempt.nominalDeadlineAt,
+    ).toEqual(newDeadline);
+
+    expect(
+      storedAttempt.processingGraceEndsAt,
+    ).toEqual(expectedGrace);
+
+    expect(storedAttempt.status).toBe(
+      'PROCESSING',
+    );
+  });
+
+  // TEST 3
+  it('does not restore an expired application when a registration window is extended', async () => {
+    const {
+      club,
+      application,
+    } = await createAwaitingCashApplication(
+      'WINDOWED',
+    );
+
+    await prisma.membershipApplication.update({
+      where: {
+        id: application.id,
+      },
+
+      data: {
+        status: 'EXPIRED',
+        endReason: 'TIMEOUT',
+      },
+    });
+
+    await prisma.payment.updateMany({
+      where: {
+        membershipApplicationId:
+          application.id,
+      },
+
+      data: {
+        status: 'EXPIRED',
+      },
+    });
+
+    const newDeadline = new Date(
+      application.paymentDeadlineAt.getTime() +
+        DAY_MS,
+    );
+
+    await clubsService.extendRegistrationWindow(
+      club.id,
+      application.registrationWindowId!,
+      newDeadline.toISOString(),
+    );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe('EXPIRED');
+
+    expect(stored.paymentDeadlineAt).toEqual(
+      application.paymentDeadlineAt,
+    );
+  });
+
+  // TEST 4
+  it('immediately expires awaiting-cash applications when registration closes early', async () => {
+    const {
+      club,
+      application,
+      payment,
+    } = await createAwaitingCashApplication(
+      'WINDOWED',
+    );
+
+    await clubsService.closeRegistrationWindow(
+      club.id,
+      application.registrationWindowId!,
+    );
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedApplication.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(storedApplication.endReason).toBe(
+      'EARLY_WINDOW_CLOSE',
+    );
+
+    expect(storedPayment.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 5
+  it('preserves a qualifying online attempt with shortened grace after early closure', async () => {
+    const {
+      club,
+      application,
+      attempt,
+    } = await createProcessingOnlinePayment(
+      'WINDOWED',
+    );
+
+    /*
+     * Ensure initiation is strictly earlier than
+     * the closure timestamp, even on fast databases.
+     */
+    await prisma.paymentAttempt.update({
+      where: {
+        id: attempt.id,
+      },
+
+      data: {
+        initiatedAt: new Date(
+          attempt.initiatedAt.getTime() - 1,
+        ),
+      },
+    });
+
+    const closedWindow =
+      await clubsService.closeRegistrationWindow(
+        club.id,
+        application.registrationWindowId!,
+      );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    const expectedGrace = new Date(
+      Math.min(
+        closedWindow.closedAt!.getTime() +
+          30 * MINUTE_MS,
+
+        attempt.processingGraceEndsAt.getTime(),
+      ),
+    );
+
+    expect(stored.status).toBe(
+      'PAYMENT_PROCESSING',
+    );
+
+    expect(stored.processingGraceEndsAt).toEqual(
+      expectedGrace,
+    );
+  });
+
+  // TEST 6
+  it('accepts verified online success during shortened early-closure grace', async () => {
+    const {
+      club,
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment(
+      'WINDOWED',
+    );
+
+    await prisma.paymentAttempt.update({
+      where: {
+        id: attempt.id,
+      },
+
+      data: {
+        initiatedAt: new Date(
+          attempt.initiatedAt.getTime() - 1,
+        ),
+      },
+    });
+
+    await clubsService.closeRegistrationWindow(
+      club.id,
+      application.registrationWindowId!,
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 7
+  it('cancels pending applications when registration mode changes', async () => {
+    const {
+      club,
+      application,
+      payment,
+    } = await createAwaitingCashApplication();
+
+    const settings =
+      await prisma.clubMembershipSettings.findUniqueOrThrow({
+        where: {
+          clubId: club.id,
+        },
+      });
+
+    await clubsService.updateMembershipMode(
+      club.id,
+      {
+        registrationMode: 'WINDOWED',
+
+        configVersion:
+          settings.configVersion,
+      },
+    );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(stored.status).toBe('CANCELED');
+
+    expect(stored.endReason).toBe(
+      'POLICY_SWITCH',
+    );
+
+    expect(storedPayment.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 8
+  it('does not cancel applications when saving an unchanged registration mode', async () => {
+    const {
+      club,
+      application,
+    } = await createAwaitingCashApplication();
+
+    const settings =
+      await prisma.clubMembershipSettings.findUniqueOrThrow({
+        where: {
+          clubId: club.id,
+        },
+      });
+
+    await clubsService.updateMembershipMode(
+      club.id,
+      {
+        registrationMode: 'ALWAYS_OPEN',
+
+        configVersion:
+          settings.configVersion,
+      },
+    );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe(
+      'PENDING_PAYMENT',
+    );
+  });
+
+  // TEST 9
+  it('does not restore applications when switching back to the original registration mode', async () => {
+    const {
+      club,
+      application,
+    } = await createAwaitingCashApplication();
+
+    const settings =
+      await prisma.clubMembershipSettings.findUniqueOrThrow({
+        where: {
+          clubId: club.id,
+        },
+      });
+
+    await clubsService.updateMembershipMode(
+      club.id,
+      {
+        registrationMode: 'WINDOWED',
+
+        configVersion:
+          settings.configVersion,
+      },
+    );
+
+    const updatedSettings =
+      await prisma.clubMembershipSettings.findUniqueOrThrow({
+        where: {
+          clubId: club.id,
+        },
+      });
+
+    await clubsService.updateMembershipMode(
+      club.id,
+      {
+        registrationMode: 'ALWAYS_OPEN',
+
+        configVersion:
+          updatedSettings.configVersion,
+      },
+    );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe('CANCELED');
+
+    expect(stored.endReason).toBe(
+      'POLICY_SWITCH',
+    );
+  });
+
+  // TEST 10
+  it('does not activate membership from an online callback after archive and reactivation', async () => {
+    const {
+      club,
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    await clubsService.archive(club.id);
+
+    await clubsService.activate(club.id);
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+      ),
+    );
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedApplication.status).toBe(
+      'CANCELED',
+    );
+
+    expect(storedApplication.endReason).toBe(
+      'CLUB_ARCHIVED',
+    );
+
+    expect(storedPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+});
+describe('Sprint 6.F - Automatic reconciliation and delayed callbacks', () => {
+  function createLifecycleService() {
+    return new MembershipLifecycleService(
+      prisma,
+
+      new ConfigService({
+        ENABLE_MEMBERSHIP_RECONCILIATION: 'false',
+      }),
+    );
+  }
+
+  async function expirePendingApplication(
+    applicationId: string,
+  ) {
+    const deadline = new Date(
+      Date.now() - MINUTE_MS,
+    );
+
+    await prisma.membershipApplication.update({
+      where: {
+        id: applicationId,
+      },
+
+      data: {
+        submittedAt: new Date(
+          deadline.getTime() - 14 * DAY_MS,
+        ),
+
+        originalDeadlineAt: deadline,
+
+        paymentDeadlineAt: deadline,
+      },
+    });
+  }
+
+  // TEST 1
+  it('reconciles an overdue application before returning the student action', async () => {
+    const {
+      club,
+      account,
+      application,
+      payment,
+    } = await createAwaitingCashApplication();
+
+    await expirePendingApplication(
+      application.id,
+    );
+
+    const quote =
+      await clubsService.getMembershipQuoteForAccount(
+        account.id,
+        club.id,
+        true,
+      );
+
+    expect(quote.action).toBe('APPLY');
+
+    expect(quote.canApply).toBe(true);
+
+    expect(quote.hasPendingApplication).toBe(false);
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedApplication.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(storedPayment.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 2
+  it('reconciles expired cash payments before returning the administrator list', async () => {
+    const {
+      club,
+      application,
+      payment,
+    } = await createAwaitingCashApplication();
+
+    const administrator =
+      await createClubAdministrator(club.id);
+
+    await expirePendingApplication(
+      application.id,
+    );
+
+    const result =
+      await paymentsService.getPendingCashPayments(
+        administrator.account.id,
+        club.id,
+      );
+
+    expect(result.total).toBe(0);
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 3
+  it('reconciles overdue applications through the bounded batch processor', async () => {
+    const { application } =
+      await createAwaitingCashApplication();
+
+    /*
+     * Give this fixture an old deadline so it
+     * appears near the beginning of the batch.
+     */
+    const deadline = new Date(
+      '2000-01-15T00:00:00.000Z',
+    );
+
+    await prisma.membershipApplication.update({
+      where: {
+        id: application.id,
+      },
+
+      data: {
+        submittedAt: new Date(
+          '2000-01-01T00:00:00.000Z',
+        ),
+
+        originalDeadlineAt: deadline,
+
+        paymentDeadlineAt: deadline,
+      },
+    });
+
+    const lifecycleService =
+      createLifecycleService();
+
+    const result =
+      await lifecycleService.reconcileDueApplications(
+        100,
+      );
+
+    expect(result.changed).toBeGreaterThanOrEqual(1);
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe('EXPIRED');
+  });
+
+  // TEST 4
+  it('does not expire a valid application during scheduled reconciliation', async () => {
+    const { application } =
+      await createAwaitingCashApplication();
+
+    const lifecycleService =
+      createLifecycleService();
+
+    await lifecycleService.reconcileDueApplications(
+      100,
+    );
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe(
+      'PENDING_PAYMENT',
+    );
+  });
+
+  // TEST 5
+  it('accepts a verified in-time success after the scheduler has expired the application', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    const lifecycleService =
+      createLifecycleService();
+
+    await lifecycleService.reconcileApplication(
+      application.id,
+    );
+
+    const before =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(before.status).toBe('EXPIRED');
+
+    const occurredAt = new Date(
+      timing.graceEndsAt.getTime() -
+        MINUTE_MS,
+    );
+
+    const event =
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+
+        {
+          occurredAt,
+        },
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    const storedApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(storedApplication.status).toBe(
+      'PAID',
+    );
+
+    expect(
+      storedApplication.endReason,
+    ).toBeNull();
+
+    const membership =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      });
+
+    expect(membership.activatedAt).toEqual(
+      occurredAt,
+    );
+  });
+
+  // TEST 6
+  it('requires refund reconciliation for a genuinely late success after persisted expiration', async () => {
+    const {
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    const lifecycleService =
+      createLifecycleService();
+
+    await lifecycleService.reconcileApplication(
+      application.id,
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+
+        {
+          occurredAt: timing.now,
+        },
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 7
+  it('does not activate an expired application when a replacement application exists', async () => {
+    const {
+      club,
+      account,
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    const lifecycleService =
+      createLifecycleService();
+
+    await lifecycleService.reconcileApplication(
+      application.id,
+    );
+
+    const replacement =
+      await applicationsService.createOrdinaryApplication(
+        account.id,
+        club.id,
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+
+        {
+          occurredAt: new Date(
+            timing.graceEndsAt.getTime() -
+              MINUTE_MS,
+          ),
+        },
+      ),
+    );
+
+    const oldPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    const replacementApplication =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: replacement.application.id,
+        },
+      });
+
+    expect(oldPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(replacementApplication.status).toBe(
+      'PENDING_PAYMENT',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 8
+  it('prevents delayed confirmation after expiration followed by archive and reactivation', async () => {
+    const {
+      club,
+      application,
+      attempt,
+      payment,
+    } = await createProcessingOnlinePayment();
+
+    const timing =
+      await simulateOnlinePaymentDeadline(
+        application.id,
+        attempt.id,
+        40,
+      );
+
+    const lifecycleService =
+      createLifecycleService();
+
+    await lifecycleService.reconcileApplication(
+      application.id,
+    );
+
+    await clubsService.archive(club.id);
+
+    await clubsService.activate(club.id);
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        attempt.id,
+        'SUCCEEDED',
+
+        {
+          occurredAt: new Date(
+            timing.graceEndsAt.getTime() -
+              MINUTE_MS,
+          ),
+        },
+      ),
+    );
+
+    const storedPayment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: payment.id,
+        },
+      });
+
+    expect(storedPayment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 9
+  it('serializes concurrent reconciliation of the same expired application', async () => {
+    const { application } =
+      await createAwaitingCashApplication();
+
+    await expirePendingApplication(
+      application.id,
+    );
+
+    const lifecycleService =
+      createLifecycleService();
+
+    const results = await Promise.all([
+      lifecycleService.reconcileApplication(
+        application.id,
+      ),
+
+      lifecycleService.reconcileApplication(
+        application.id,
+      ),
+    ]);
+
+    expect(
+      results.filter(
+        result => result?.changed,
+      ),
+    ).toHaveLength(1);
+
+    const stored =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: application.id,
+        },
+      });
+
+    expect(stored.status).toBe('EXPIRED');
+  });
+
+  // TEST 10
+  it('offers renewal pricing after a confirmed membership has expired', async () => {
+    const club = await createClub();
+
+    const { student, account } =
+      await createStudent();
+
+    await prisma.membership.create({
+      data: {
+        clubId: club.id,
+
+        studentId: student.id,
+
+        activatedAt: new Date(
+          '2023-01-01T00:00:00.000Z',
+        ),
+
+        expiresAt: new Date(
+          '2024-01-01T00:00:00.000Z',
+        ),
+      },
+    });
+
+    const quote =
+      await clubsService.getMembershipQuoteForAccount(
+        account.id,
+        club.id,
+        true,
+      );
+
+    expect(quote.action).toBe('RENEW');
+
+    expect(quote.canApply).toBe(true);
+
+    expect(quote.amount).toBe('20.00');
+
+    expect(quote.feeType).toBe('RENEWAL');
+
+    expect(quote.alreadyActiveMember).toBe(false);
   });
 });
 });

@@ -6,6 +6,9 @@ import { ClubsModule } from '../clubs/clubs.module';
 
 import { MembershipApplicationsController } from './membership-applications.controller';
 import { MembershipApplicationsService } from './membership-applications.service';
+import {
+  MembershipLifecycleService,
+} from './membership-lifecycle.service';
 
 @Module({
   imports: [
@@ -20,10 +23,12 @@ import { MembershipApplicationsService } from './membership-applications.service
 
   providers: [
     MembershipApplicationsService,
+    MembershipLifecycleService,
   ],
 
   exports: [
     MembershipApplicationsService,
+    MembershipLifecycleService,
   ],
 })
 export class MembershipApplicationsModule {}

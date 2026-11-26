@@ -109,6 +109,13 @@ enum ApplicationEndReason {
   PAYMENT_FAILED
 }
 
+enum PaymentProviderEventStatus {
+  RECEIVED
+  APPLIED
+  IGNORED
+  RECONCILIATION_REQUIRED
+}
+
 model Faculty {
   id          String              @id @default(uuid()) @db.Uuid
   name        String              @unique @db.VarChar(150)
@@ -673,11 +680,11 @@ model PaymentAttempt {
 
   payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
 
-  status   PaymentAttemptStatus @default(INITIATED)
-  provider PaymentProvider
-
-  providerAttemptRef String? @db.VarChar(255)
-  idempotencyKey     String  @unique @db.VarChar(255)
+  status             PaymentAttemptStatus   @default(INITIATED)
+  provider           PaymentProvider
+  providerEvents     PaymentProviderEvent[]
+  providerAttemptRef String?                @db.VarChar(255)
+  idempotencyKey     String                 @unique @db.VarChar(255)
 
   initiatedAt DateTime @default(now()) @db.Timestamptz(6)
 
@@ -743,4 +750,34 @@ model BoardNomination {
 
   @@index([clubId, status, deadlineAt])
   @@index([studentId, status, deadlineAt])
+}
+
+model PaymentProviderEvent {
+  id String @id @default(uuid()) @db.Uuid
+
+  provider PaymentProvider
+
+  providerEventId String @db.VarChar(255)
+
+  paymentAttemptId String @db.Uuid
+
+  paymentAttempt PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  outcome String @db.VarChar(30)
+
+  status PaymentProviderEventStatus @default(RECEIVED)
+
+  payloadDigest String @db.VarChar(64)
+
+  providerOccurredAt DateTime @db.Timestamptz(6)
+
+  receivedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  processedAt DateTime? @db.Timestamptz(6)
+
+  processingNote String? @db.VarChar(255)
+
+  @@unique([provider, providerEventId])
+  @@index([paymentAttemptId, receivedAt])
+  @@index([status, receivedAt])
 }

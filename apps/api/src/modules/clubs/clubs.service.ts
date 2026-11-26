@@ -25,6 +25,20 @@ import type {
 import {
   resolveMembershipAction,
 } from '../../shared/membership/membership-action';
+import {
+  cancelClubOrdinaryApplications,
+  extendWindowApplicationDeadlines,
+  reconcileEarlyClosedWindowApplications,
+} from '../../shared/membership/membership-lifecycle';
+
+import {
+  lockMembershipClub,
+  lockMembershipRegistrationWindow,
+  getMembershipTransactionTime,
+} from '../../shared/membership/membership-lock';
+import {
+  reconcileStudentClubApplications,
+} from '../../shared/membership/membership-lifecycle';
 
 @Injectable()
 export class ClubsService {
@@ -921,7 +935,19 @@ async getMembershipQuoteForAccount(
     );
   }
 
-  const studentId = account.universityStudentId;
+  const studentId =
+    account.universityStudentId;
+
+  /*
+  * Reconcile expired applications before
+  * calculating the student's membership action.
+  */
+  await reconcileStudentClubApplications(
+    this.prisma,
+    studentId,
+    clubId,
+  );
+
   const now = new Date();
 
   const [
@@ -1662,6 +1688,7 @@ async updateMembershipMode(
   dto: UpdateMembershipModeDto,
 ) {
   return this.prisma.$transaction(async (tx) => {
+    await lockMembershipClub(tx, clubId);
     const club = await tx.club.findUnique({
       where: { id: clubId },
       select: { id: true, status: true },
@@ -1709,7 +1736,8 @@ async updateMembershipMode(
       return settings;
     }
 
-    const now = new Date();
+    const now =
+       await getMembershipTransactionTime(tx);
 
     if (dto.registrationMode === 'ALWAYS_OPEN') {
       // Cancel every future, unlocked registration window.
@@ -1792,7 +1820,12 @@ async updateMembershipMode(
         },
       });
     }
-
+    await cancelClubOrdinaryApplications(
+      tx,
+      clubId,
+      now,
+      'POLICY_SWITCH',
+    );
     return tx.clubMembershipSettings.findUniqueOrThrow({
       where: { clubId },
     });
@@ -2012,6 +2045,21 @@ async closeRegistrationWindow(
   windowId: string,
 ) {
   return this.prisma.$transaction(async (tx) => {
+    await lockMembershipClub(tx, clubId);
+
+const settingsLock =
+  await tx.$queryRaw<{ id: string }[]>`
+    SELECT "id"
+    FROM "ClubMembershipSettings"
+    WHERE "clubId" = ${clubId}::uuid
+    FOR UPDATE
+  `;
+
+if (settingsLock.length === 0) {
+  throw new ConflictException(
+    'Membership configuration is missing.',
+  );
+}
     const club = await tx.club.findUnique({
       where: { id: clubId },
       select: {
@@ -2046,6 +2094,11 @@ async closeRegistrationWindow(
         'The club is not using scheduled registration.',
       );
     }
+    await lockMembershipRegistrationWindow(
+      tx,
+      clubId,
+      windowId,
+    );
 
     const existing =
       await tx.clubRegistrationWindow.findFirst({
@@ -2061,7 +2114,8 @@ async closeRegistrationWindow(
       );
     }
 
-    const now = new Date();
+    const now =
+       await getMembershipTransactionTime(tx);
 
     // Early closure is allowed only while the window is active.
     if (existing.opensAt > now) {
@@ -2103,6 +2157,12 @@ async closeRegistrationWindow(
         'Registration window changed. Reload before closing.',
       );
     }
+    await reconcileEarlyClosedWindowApplications(
+  tx,
+  clubId,
+  windowId,
+  now,
+);
 
     return tx.clubRegistrationWindow.findUniqueOrThrow({
       where: { id: windowId },
@@ -2121,6 +2181,7 @@ async extendRegistrationWindow(
   }
 
   return this.prisma.$transaction(async (tx) => {
+    await lockMembershipClub(tx, clubId);
     // Match the membership lifecycle's locking order:
     // settings first, then registration window.
     const settingsLock = await tx.$queryRaw<{ id: string }[]>`
@@ -2233,10 +2294,26 @@ async extendRegistrationWindow(
 
     // Update only closesAt. Never replace the window
     // or modify its locked membership fee version.
-    return tx.clubRegistrationWindow.update({
-      where: { id: windowId },
-      data: { closesAt: newClosesAt },
-    });
+    const extendedWindow =
+  await tx.clubRegistrationWindow.update({
+    where: {
+      id: windowId,
+    },
+
+    data: {
+      closesAt: newClosesAt,
+    },
+  });
+
+await extendWindowApplicationDeadlines(
+  tx,
+  clubId,
+  windowId,
+  newClosesAt,
+  now,
+);
+
+return extendedWindow;
   });
 }
 async updateRegistrationWindow(
@@ -2548,30 +2625,79 @@ if (
     throw error;
   }
 }
-// Sprint 3.3: Archive an active club.
 async archive(id: string) {
-  const result = await this.prisma.club.updateMany({
-    where: {
+  await this.prisma.$transaction(async (tx) => {
+    await lockMembershipClub(
+      tx,
       id,
-      status: 'ACTIVE',
-    },
-    data: {
-      status: 'ARCHIVED',
-    },
-  });
+    );
 
-  if (result.count === 0) {
-    const club = await this.prisma.club.findUnique({
-      where: { id },
-      select: { status: true },
+    const club = await tx.club.findUnique({
+      where: {
+        id,
+      },
+
+      select: {
+        status: true,
+      },
     });
 
     if (!club) {
-      throw new NotFoundException('Club not found.');
+      throw new NotFoundException(
+        'Club not found.',
+      );
     }
 
-    throw new ConflictException('Club is already archived.');
-  }
+    if (club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Club is already archived.',
+      );
+    }
+
+    /*
+     * Some legacy clubs may not have membership
+     * settings. Lock the row only if it exists.
+     */
+    await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "ClubMembershipSettings"
+      WHERE "clubId" = ${id}::uuid
+      FOR UPDATE
+    `;
+
+    const now =
+      await getMembershipTransactionTime(tx);
+
+    const result =
+      await tx.club.updateMany({
+        where: {
+          id,
+
+          status: 'ACTIVE',
+        },
+
+        data: {
+          status: 'ARCHIVED',
+        },
+      });
+
+    if (result.count !== 1) {
+      throw new ConflictException(
+        'Club is already archived.',
+      );
+    }
+
+    /*
+     * Archiving and application cancellation
+     * must commit or roll back together.
+     */
+    await cancelClubOrdinaryApplications(
+      tx,
+      id,
+      now,
+      'CLUB_ARCHIVED',
+    );
+  });
 
   return this.findOneForDeanship(id);
 }

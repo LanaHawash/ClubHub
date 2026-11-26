@@ -21,6 +21,7 @@ interface ConfirmOrdinaryPaymentInput {
   payment: Payment;
   confirmedAt: Date;
   confirmedByAccountId: string | null;
+  allowExpiredOnlineReconciliation?: boolean;
 }
 
 @Injectable()
@@ -122,17 +123,33 @@ export class PaymentConfirmationService {
         );
       }
     } else {
-      if (
-        payment.status !== 'PROCESSING' ||
-        application.status !== 'PAYMENT_PROCESSING' ||
-        confirmedByAccountId !== null ||
-        payment.provider === 'MANUAL'
-      ) {
-        throw new ConflictException(
-          'Online payment cannot be confirmed in its current state.',
-        );
-      }
-    }
+  const normalConfirmation =
+    payment.status === 'PROCESSING' &&
+    application.status === 'PAYMENT_PROCESSING';
+
+  const expiredReconciliation =
+    input.allowExpiredOnlineReconciliation === true &&
+
+    payment.status === 'EXPIRED' &&
+
+    application.status === 'EXPIRED' &&
+
+    (
+      application.endReason === 'TIMEOUT' ||
+      application.endReason === 'WINDOW_CLOSED' ||
+      application.endReason === 'EARLY_WINDOW_CLOSE'
+    );
+
+  if (
+    (!normalConfirmation && !expiredReconciliation) ||
+    confirmedByAccountId !== null ||
+    payment.provider === 'MANUAL'
+  ) {
+    throw new ConflictException(
+      'Online payment cannot be confirmed in its current state.',
+    );
+  }
+}
 
     const activatedAt = confirmedAt;
 

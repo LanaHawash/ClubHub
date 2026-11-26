@@ -23,6 +23,9 @@ import {
 import {
   calculateAlwaysOpenDeadline,
 } from '../../shared/membership/membership-time';
+import {
+  reconcileOrdinaryApplication,
+} from '../../shared/membership/membership-lifecycle';
 
 @Injectable()
 export class MembershipApplicationsService {
@@ -230,43 +233,66 @@ export class MembershipApplicationsService {
           });
         }
 
-        const pendingApplication =
-          await tx.membershipApplication.findFirst({
-            where: {
-              clubId,
-              studentId,
-              status: {
-                in: [
-                  'PENDING_PAYMENT',
-                  'PAYMENT_PROCESSING',
-                ],
-              },
-            },
-            select: {
-              id: true,
-              status: true,
-              paymentDeadlineAt: true,
-              quotedAmount: true,
-              currency: true,
-            },
-          });
+        let pendingApplication =
+  await tx.membershipApplication.findFirst({
+    where: {
+      clubId,
 
-        if (pendingApplication) {
-          throw new ConflictException({
-            code: 'APPLICATION_ALREADY_PENDING',
-            message:
-              'You already have a pending membership application.',
-            details: {
-              currentApplicationId: pendingApplication.id,
-              status: pendingApplication.status,
-              paymentDeadlineAt:
-                pendingApplication.paymentDeadlineAt,
-              quotedAmount:
-                pendingApplication.quotedAmount.toFixed(2),
-              currency: pendingApplication.currency,
-            },
-          });
-        }
+      studentId,
+
+      status: {
+        in: [
+          'PENDING_PAYMENT',
+          'PAYMENT_PROCESSING',
+        ],
+      },
+    },
+  });
+
+if (
+  pendingApplication &&
+  pendingApplication.kind === 'ORDINARY'
+) {
+  const reconciliation =
+    await reconcileOrdinaryApplication(
+      tx,
+      pendingApplication,
+      now,
+    );
+
+  if (
+    reconciliation.status === 'EXPIRED' ||
+    reconciliation.status === 'CANCELED'
+  ) {
+    pendingApplication = null;
+  }
+}
+
+if (pendingApplication) {
+  throw new ConflictException({
+    code: 'APPLICATION_ALREADY_PENDING',
+
+    message:
+      'You already have a pending membership application.',
+
+    details: {
+      currentApplicationId:
+        pendingApplication.id,
+
+      status:
+        pendingApplication.status,
+
+      paymentDeadlineAt:
+        pendingApplication.paymentDeadlineAt,
+
+      quotedAmount:
+        pendingApplication.quotedAmount.toFixed(2),
+
+      currency:
+        pendingApplication.currency,
+    },
+  });
+}
 
         /*
          * Renewal pricing depends on confirmed membership

@@ -115,3 +115,28 @@ export async function getMembershipTransactionTime(
 
   return rows[0].now;
 }
+
+/**
+ * Serializes provider callbacks sharing the same
+ * provider event identity.
+ *
+ * Acquire this lock before membership-related locks.
+ */
+export async function lockProviderEventIdentity(
+  tx: MembershipTransaction,
+  provider: string,
+  providerEventId: string,
+): Promise<void> {
+  const lockKey =
+    `clubhub:provider-event:${provider}:${providerEventId}`;
+
+  await tx.$queryRaw<{ locked: boolean }[]>`
+    SELECT TRUE AS locked
+    FROM pg_advisory_xact_lock(
+      hashtextextended(
+        ${lockKey},
+        0::bigint
+      )
+    )
+  `;
+}

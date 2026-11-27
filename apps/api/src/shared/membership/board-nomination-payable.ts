@@ -40,6 +40,10 @@ export async function assertBoardNominationPayable(
   tx: MembershipTransaction,
   application: MembershipApplication,
   now: Date,
+  options: {
+    allowProcessing?: boolean;
+    paymentOccurredAt?: Date;
+  } = {},
 ) {
   if (
     application.kind !== 'BOARD_ONBOARDING' ||
@@ -53,7 +57,13 @@ export async function assertBoardNominationPayable(
     });
   }
 
-  if (application.status !== 'PENDING_PAYMENT') {
+  if (
+  application.status !== 'PENDING_PAYMENT' &&
+  !(
+    options.allowProcessing === true &&
+    application.status === 'PAYMENT_PROCESSING'
+  )
+) {
     throw new ConflictException({
       code: 'APPLICATION_NOT_PAYABLE',
 
@@ -62,7 +72,10 @@ export async function assertBoardNominationPayable(
     });
   }
 
-  if (now >= application.paymentDeadlineAt) {
+  const paymentTime =
+  options.paymentOccurredAt ?? now;
+
+if (paymentTime >= application.paymentDeadlineAt) {
     throw new ConflictException({
       code: 'NOMINATION_DEADLINE_PASSED',
 
@@ -91,10 +104,16 @@ export async function assertBoardNominationPayable(
     });
   }
 
-  if (
-    nomination.status !== 'PENDING_PAYMENT' ||
-    nomination.boardAppointmentId !== null
-  ) {
+  const validNominationStatus =
+  application.status === 'PENDING_PAYMENT'
+    ? nomination.status === 'PENDING_PAYMENT'
+    : options.allowProcessing === true &&
+      nomination.status === 'PAYMENT_PROCESSING';
+
+if (
+  !validNominationStatus ||
+  nomination.boardAppointmentId !== null
+) {
     throw new ConflictException({
       code: 'NOMINATION_NOT_PAYABLE',
 
@@ -104,10 +123,10 @@ export async function assertBoardNominationPayable(
   }
 
   if (
-    now >= nomination.deadlineAt ||
-    nomination.deadlineAt.getTime() !==
-      application.paymentDeadlineAt.getTime()
-  ) {
+  paymentTime >= nomination.deadlineAt ||
+  nomination.deadlineAt.getTime() !==
+    application.paymentDeadlineAt.getTime()
+) {
     throw new ConflictException({
       code: 'NOMINATION_DEADLINE_INVALID',
 

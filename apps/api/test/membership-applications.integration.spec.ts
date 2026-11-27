@@ -7205,5 +7205,793 @@ describe('Nomination cash payments', () => {
     expect(result.payments).toEqual([]);
   });
 });
+
+
+describe('Nomination online payments', () => {
+  async function createOnlineNomination(
+    mode:
+      | 'ALWAYS_OPEN'
+      | 'WINDOWED' = 'ALWAYS_OPEN',
+  ) {
+    const fixture =
+      await createBoardFixture(mode);
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    if (
+      result.outcome !== 'NOMINATION_CREATED'
+    ) {
+      throw new Error(
+        'Expected a provisional nomination.',
+      );
+    }
+
+    return {
+      ...fixture,
+
+      nomination:
+        result.nomination,
+
+      application:
+        result.application,
+    };
+  }
+
+  async function createProcessingNomination(
+    mode:
+      | 'ALWAYS_OPEN'
+      | 'WINDOWED' = 'ALWAYS_OPEN',
+  ) {
+    const fixture =
+      await createOnlineNomination(mode);
+
+    const online =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    return {
+      ...fixture,
+
+      payment: online.payment,
+
+      attempt: online.attempt,
+    };
+  }
+
+  // TEST 1
+  it('allows a nominee to initiate an online payment', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    expect(fixture.payment.method).toBe(
+      'ONLINE',
+    );
+
+    expect(fixture.payment.status).toBe(
+      'PROCESSING',
+    );
+
+    expect(fixture.payment.amount).toBe(
+      '30.00',
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'PAYMENT_PROCESSING',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 2
+  it('allows online nomination payment when ordinary registration is closed', async () => {
+    const fixture =
+      await createProcessingNomination(
+        'WINDOWED',
+      );
+
+    expect(fixture.payment.status).toBe(
+      'PROCESSING',
+    );
+
+    expect(
+      fixture.application.registrationWindowId,
+    ).toBeNull();
+  });
+
+  // TEST 3
+  it('does not create duplicate nomination payment attempts', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    const repeated =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    expect(repeated.existingAttempt).toBe(true);
+
+    expect(repeated.attempt.id).toBe(
+      fixture.attempt.id,
+    );
+  });
+
+  // TEST 4
+  it('does not add ordinary registration grace to nomination payments', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    expect(
+      fixture.attempt.nominalDeadlineAt,
+    ).toEqual(
+      fixture.nomination.deadlineAt,
+    );
+
+    expect(
+      fixture.attempt.processingGraceEndsAt,
+    ).toEqual(
+      fixture.nomination.deadlineAt,
+    );
+  });
+
+  // TEST 5
+  it('qualifies a nominee after verified online payment success', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    const event =
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'SUCCEEDED',
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    const payment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: fixture.payment.id,
+        },
+      });
+
+    const application =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: fixture.application.id,
+        },
+      });
+
+    const membership =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      });
+
+    expect(payment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(
+      payment.confirmedByAccountId,
+    ).toBeNull();
+
+    expect(application.status).toBe(
+      'PAID',
+    );
+
+    expect(nomination.status).toBe(
+      'QUALIFIED',
+    );
+
+    expect(
+      nomination.boardAppointmentId,
+    ).not.toBeNull();
+
+    expect(membership.sourcePaymentId).toBe(
+      fixture.payment.id,
+    );
+
+    expect(
+      membership.membershipNumber,
+    ).toMatch(/^CH-\d{4}-\d+$/);
+  });
+
+  // TEST 6
+  it('qualifies an online nominee while ordinary registration remains closed', async () => {
+    const fixture =
+      await createProcessingNomination(
+        'WINDOWED',
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'QUALIFIED',
+    );
+
+    const availability =
+      await clubsService.getMembershipAvailability(
+        fixture.club.id,
+      );
+
+    expect(
+      availability.registrationAvailable,
+    ).toBe(false);
+  });
+
+  // TEST 7
+  it('makes duplicate successful nomination callbacks idempotent', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    const event =
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'SUCCEEDED',
+      );
+
+    await providerEventsService.processSignedEvent(
+      event,
+    );
+
+    const repeated =
+      await providerEventsService.processSignedEvent(
+        event,
+      );
+
+    expect(repeated.duplicate).toBe(true);
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(1);
+
+    expect(
+      await prisma.boardAppointment.count({
+        where: {
+          clubId: fixture.club.id,
+
+          studentId: fixture.student.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 8
+  it('returns a nomination to pending payment after a definitive online failure', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'FAILED',
+      ),
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    const application =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: fixture.application.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'PENDING_PAYMENT',
+    );
+
+    expect(application.status).toBe(
+      'PENDING_PAYMENT',
+    );
+  });
+
+  // TEST 9
+  it('allows retry of a definitively failed nomination online payment', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'FAILED',
+      ),
+    );
+
+    const retry =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    expect(retry.payment.id).toBe(
+      fixture.payment.id,
+    );
+
+    expect(retry.attempt.id).not.toBe(
+      fixture.attempt.id,
+    );
+
+    expect(retry.payment.amount).toBe(
+      '30.00',
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        retry.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'QUALIFIED',
+    );
+  });
+
+  // TEST 10
+  it('blocks another payment attempt while nomination payment outcome is unknown', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'UNKNOWN',
+      ),
+    );
+
+    const repeated =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    expect(repeated.attempt.id).toBe(
+      fixture.attempt.id,
+    );
+
+    expect(repeated.attempt.status).toBe(
+      'UNKNOWN',
+    );
+
+    await expect(
+      paymentsService.selectCashPayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  // TEST 11
+  it('does not permit online initiation after nomination cash payment is selected', async () => {
+    const fixture =
+      await createOnlineNomination();
+
+    await paymentsService.selectCashPayment(
+      fixture.account.id,
+
+      fixture.application.id,
+    );
+
+    await expect(
+      onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  // TEST 12
+  it('supports prepaid membership renewal through online nomination payment', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const previousExpiry =
+      new Date(
+        Date.now() + 30 * DAY_MS,
+      );
+
+    await prisma.membership.create({
+      data: {
+        clubId: fixture.club.id,
+
+        studentId: fixture.student.id,
+
+        activatedAt: new Date(
+          Date.now() - 335 * DAY_MS,
+        ),
+
+        expiresAt: previousExpiry,
+      },
+    });
+
+    const nomination =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    if (
+      nomination.outcome !== 'NOMINATION_CREATED'
+    ) {
+      throw new Error(
+        'Expected prepaid renewal nomination.',
+      );
+    }
+
+    const online =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        nomination.application.id,
+      );
+
+    expect(online.payment.amount).toBe(
+      '20.00',
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        online.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    const renewed =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          sourceApplicationId:
+            nomination.application.id,
+        },
+      });
+
+    expect(renewed.activatedAt).toEqual(
+      previousExpiry,
+    );
+
+    expect(
+      renewed.confirmedPaymentAt!.getTime(),
+    ).toBeLessThan(
+      renewed.activatedAt.getTime(),
+    );
+  });
+
+  // TEST 13
+  it('requires refund reconciliation when a nomination payment succeeds for an archived club', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    await clubsService.archive(
+      fixture.club.id,
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    const payment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: fixture.payment.id,
+        },
+      });
+
+    expect(payment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 14
+  it('does not automatically assign administrator permissions after online qualification', async () => {
+    const fixture =
+      await createProcessingNomination();
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        fixture.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    expect(
+      await prisma.clubAdminAssignment.count({
+        where: {
+          clubId: fixture.club.id,
+
+          accountId: fixture.account.id,
+        },
+      }),
+    ).toBe(0);
+  });
+async function moveNominationDeadlineToPast(
+  nominationId: string,
+  applicationId: string,
+  attemptId: string,
+) {
+  const clock =
+    await prisma.$queryRaw<{ now: Date }[]>`
+      SELECT clock_timestamp() AS now
+    `;
+
+  const now = clock[0].now;
+
+  const deadline = new Date(
+    now.getTime() - 5 * MINUTE_MS,
+  );
+
+  const nominatedAt = new Date(
+    deadline.getTime() -
+      72 * 60 * MINUTE_MS,
+  );
+
+  const initiatedAt = new Date(
+    deadline.getTime() - 10 * MINUTE_MS,
+  );
+
+  await prisma.$transaction([
+    prisma.boardNomination.update({
+      where: {
+        id: nominationId,
+      },
+
+      data: {
+        nominatedAt,
+
+        deadlineAt: deadline,
+      },
+    }),
+
+    prisma.membershipApplication.update({
+      where: {
+        id: applicationId,
+      },
+
+      data: {
+        submittedAt: nominatedAt,
+
+        originalDeadlineAt: deadline,
+
+        paymentDeadlineAt: deadline,
+
+        processingGraceEndsAt: deadline,
+      },
+    }),
+
+    prisma.paymentAttempt.update({
+      where: {
+        id: attemptId,
+      },
+
+      data: {
+        initiatedAt,
+
+        nominalDeadlineAt: deadline,
+
+        processingGraceEndsAt: deadline,
+      },
+    }),
+  ]);
+
+  return {
+    now,
+
+    deadline,
+  };
+}
+
+// TEST 15
+it('requires refund reconciliation for success after the 72-hour nomination cutoff', async () => {
+  const fixture =
+    await createProcessingNomination();
+
+  const timing =
+    await moveNominationDeadlineToPast(
+      fixture.nomination.id,
+
+      fixture.application.id,
+
+      fixture.attempt.id,
+    );
+
+  await providerEventsService.processSignedEvent(
+    await createOnlineProviderEvent(
+      fixture.attempt.id,
+
+      'SUCCEEDED',
+
+      {
+        occurredAt: timing.now,
+      },
+    ),
+  );
+
+  const payment =
+    await prisma.payment.findUniqueOrThrow({
+      where: {
+        id: fixture.payment.id,
+      },
+    });
+
+  const nomination =
+    await prisma.boardNomination.findUniqueOrThrow({
+      where: {
+        id: fixture.nomination.id,
+      },
+    });
+
+  expect(payment.status).toBe(
+    'REFUND_REQUIRED',
+  );
+
+  expect(nomination.status).toBe(
+    'EXPIRED',
+  );
+
+  expect(
+    nomination.boardAppointmentId,
+  ).toBeNull();
+
+  expect(
+    await prisma.membership.count({
+      where: {
+        sourceApplicationId:
+          fixture.application.id,
+      },
+    }),
+  ).toBe(0);
+});
+
+// TEST 16
+it('does not permit another nomination payment attempt following failure after the deadline', async () => {
+  const fixture =
+    await createProcessingNomination();
+
+  await moveNominationDeadlineToPast(
+    fixture.nomination.id,
+
+    fixture.application.id,
+
+    fixture.attempt.id,
+  );
+
+  await providerEventsService.processSignedEvent(
+    await createOnlineProviderEvent(
+      fixture.attempt.id,
+
+      'FAILED',
+    ),
+  );
+
+  const nomination =
+    await prisma.boardNomination.findUniqueOrThrow({
+      where: {
+        id: fixture.nomination.id,
+      },
+    });
+
+  const application =
+    await prisma.membershipApplication.findUniqueOrThrow({
+      where: {
+        id: fixture.application.id,
+      },
+    });
+
+  expect(nomination.status).toBe(
+    'EXPIRED',
+  );
+
+  expect(application.status).toBe(
+    'EXPIRED',
+  );
+
+  await expect(
+    onlinePaymentsService.initiateOnlinePayment(
+      fixture.account.id,
+
+      fixture.application.id,
+    ),
+  ).rejects.toBeInstanceOf(
+    ConflictException,
+  );
+});
+});
 });
 });

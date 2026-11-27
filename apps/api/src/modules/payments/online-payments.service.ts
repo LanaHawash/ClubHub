@@ -40,6 +40,10 @@ import type {
   OnlinePaymentProvider,
 } from './providers/payment-provider.interface';
 
+import {
+  assertBoardNominationPayable,
+} from '../../shared/membership/board-nomination-payable';
+
 @Injectable()
 export class OnlinePaymentsService {
   constructor(
@@ -174,11 +178,8 @@ export class OnlinePaymentsService {
         );
       }
 
-      if (application.kind !== 'ORDINARY') {
-        throw new ConflictException(
-          'An ordinary membership application is required.',
-        );
-      }
+      const isBoardNomination =
+  application.kind === 'BOARD_ONBOARDING';
 
       /*
        * An existing unresolved attempt must block
@@ -207,6 +208,19 @@ export class OnlinePaymentsService {
         });
 
       if (unresolvedAttempt) {
+        if (isBoardNomination) {
+  const now =
+    await getMembershipTransactionTime(tx);
+
+  await assertBoardNominationPayable(
+    tx,
+    application,
+    now,
+    {
+      allowProcessing: true,
+    },
+  );
+}
         return {
           applicationStatus:
             application.status,
@@ -257,11 +271,19 @@ export class OnlinePaymentsService {
       const now =
         await getMembershipTransactionTime(tx);
 
-      await assertOrdinaryApplicationPayable(
-        tx,
-        application,
-        now,
-      );
+      if (isBoardNomination) {
+  await assertBoardNominationPayable(
+    tx,
+    application,
+    now,
+  );
+} else {
+  await assertOrdinaryApplicationPayable(
+    tx,
+    application,
+    now,
+  );
+}
 
       /*
        * Do not allow cash and online payment methods
@@ -359,9 +381,11 @@ export class OnlinePaymentsService {
       }
 
       const processingGraceEndsAt =
-        calculateOnlineGraceDeadline(
-          application.paymentDeadlineAt,
-        );
+  isBoardNomination
+    ? application.paymentDeadlineAt
+    : calculateOnlineGraceDeadline(
+        application.paymentDeadlineAt,
+      );
 
       /*
        * Create a distinct attempt with a server-generated
@@ -474,6 +498,28 @@ export class OnlinePaymentsService {
             processingGraceEndsAt,
           },
         });
+        if (isBoardNomination) {
+  const nominationUpdated =
+    await tx.boardNomination.updateMany({
+      where: {
+        id: application.boardNominationId!,
+
+        status: 'PENDING_PAYMENT',
+
+        boardAppointmentId: null,
+      },
+
+      data: {
+        status: 'PAYMENT_PROCESSING',
+      },
+    });
+
+  if (nominationUpdated.count !== 1) {
+    throw new ConflictException(
+      'The nomination state changed during payment initiation.',
+    );
+  }
+}
 
       return {
         applicationStatus:

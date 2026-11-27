@@ -20,14 +20,16 @@ import {
   evaluateBoardMembershipCoverage,
 } from '../../shared/membership/board-membership-coverage';
 
-interface ConfirmBoardCashPaymentInput {
+interface ConfirmBoardPaymentInput {
   application: MembershipApplication;
 
   payment: Payment;
 
   confirmedAt: Date;
 
-  confirmedByAccountId: string;
+  confirmedByAccountId: string | null;
+
+  qualificationAt?: Date;
 }
 
 @Injectable()
@@ -41,16 +43,56 @@ export class BoardPaymentConfirmationService {
    * - Verify active Deanship authorization.
    * - Verify the candidate's academic eligibility.
    */
-  async confirmBoardCashPayment(
-    tx: MembershipTransaction,
-    input: ConfirmBoardCashPaymentInput,
+ async confirmBoardCashPayment(
+  tx: MembershipTransaction,
+  input: ConfirmBoardPaymentInput,
+) {
+  if (
+    input.payment.method !== 'IN_PERSON' ||
+    input.payment.provider !== 'MANUAL' ||
+    !input.confirmedByAccountId
   ) {
+    throw new ConflictException(
+      'Invalid board nomination cash confirmation.',
+    );
+  }
+
+  return this.confirmBoardPayment(
+    tx,
+    input,
+  );
+}
+
+async confirmBoardPayment(
+  tx: MembershipTransaction,
+  input: ConfirmBoardPaymentInput,
+) {
     const {
       application,
       payment,
       confirmedAt,
       confirmedByAccountId,
     } = input;
+    const qualificationAt =
+  input.qualificationAt ?? confirmedAt;
+
+const isOnline =
+  payment.method === 'ONLINE';
+
+const expectedPaymentStatus =
+  isOnline
+    ? 'PROCESSING'
+    : 'AWAITING_CASH';
+
+const expectedApplicationStatus =
+  isOnline
+    ? 'PAYMENT_PROCESSING'
+    : 'PENDING_PAYMENT';
+
+const expectedNominationStatus =
+  isOnline
+    ? 'PAYMENT_PROCESSING'
+    : 'PENDING_PAYMENT';
 
     if (
       application.kind !== 'BOARD_ONBOARDING' ||
@@ -62,19 +104,36 @@ export class BoardPaymentConfirmationService {
     }
 
     if (
-      payment.membershipApplicationId !==
-        application.id ||
+  payment.membershipApplicationId !==
+    application.id ||
 
-      payment.eventRegistrationId !== null ||
+  payment.eventRegistrationId !== null
+) {
+  throw new ConflictException(
+    'Invalid board nomination payment.',
+  );
+}
 
-      payment.method !== 'IN_PERSON' ||
-
-      payment.provider !== 'MANUAL'
-    ) {
-      throw new ConflictException(
-        'Invalid board nomination cash payment.',
-      );
-    }
+if (isOnline) {
+  if (
+    payment.provider === 'MANUAL' ||
+    confirmedByAccountId !== null
+  ) {
+    throw new ConflictException(
+      'Invalid online nomination confirmation.',
+    );
+  }
+} else {
+  if (
+    payment.method !== 'IN_PERSON' ||
+    payment.provider !== 'MANUAL' ||
+    !confirmedByAccountId
+  ) {
+    throw new ConflictException(
+      'Invalid cash nomination confirmation.',
+    );
+  }
+}
 
     if (
       !payment.amount.equals(
@@ -153,12 +212,15 @@ export class BoardPaymentConfirmationService {
       };
     }
 
-    if (payment.status !== 'AWAITING_CASH') {
+    if (
+        payment.status !== expectedPaymentStatus ||
+        application.status !== expectedApplicationStatus
+        ) {
       throw new ConflictException({
         code: 'PAYMENT_NOT_CONFIRMABLE',
 
         message:
-          'The nomination payment is not awaiting cash confirmation.',
+  'The nomination payment is not confirmable in its current state.',
       });
     }
 
@@ -167,11 +229,16 @@ export class BoardPaymentConfirmationService {
      * confirmation time.
      */
     const validation =
-      await assertBoardNominationPayable(
-        tx,
-        application,
-        confirmedAt,
-      );
+  await assertBoardNominationPayable(
+    tx,
+    application,
+    qualificationAt,
+    {
+      allowProcessing: isOnline,
+
+      paymentOccurredAt: confirmedAt,
+    },
+  );
 
     const {
       nomination,
@@ -193,7 +260,7 @@ export class BoardPaymentConfirmationService {
         where: {
           id: payment.id,
 
-          status: 'AWAITING_CASH',
+          status: expectedPaymentStatus,
         },
 
         data: {
@@ -219,7 +286,7 @@ export class BoardPaymentConfirmationService {
         where: {
           id: application.id,
 
-          status: 'PENDING_PAYMENT',
+          status: expectedApplicationStatus,
         },
 
         data: {
@@ -316,7 +383,7 @@ export class BoardPaymentConfirmationService {
         where: {
           id: nomination.id,
 
-          status: 'PENDING_PAYMENT',
+          status: expectedNominationStatus,
 
           boardAppointmentId: null,
         },
@@ -324,7 +391,7 @@ export class BoardPaymentConfirmationService {
         data: {
           status: 'QUALIFIED',
 
-          qualifiedAt: confirmedAt,
+          qualifiedAt: qualificationAt,
 
           boardAppointmentId: appointment.id,
         },

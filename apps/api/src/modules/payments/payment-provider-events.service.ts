@@ -51,6 +51,14 @@ import type {
   SignedProviderPaymentEvent,
 } from './providers/payment-provider.interface';
 
+import {
+  BoardPaymentConfirmationService,
+} from './board-payment-confirmation.service';
+
+import {
+  assertBoardNominationPayable,
+} from '../../shared/membership/board-nomination-payable';
+
 @Injectable()
 export class PaymentProviderEventsService {
   constructor(
@@ -65,6 +73,10 @@ export class PaymentProviderEventsService {
     @Inject(ONLINE_PAYMENT_PROVIDER)
     private readonly provider:
       OnlinePaymentProvider,
+
+    private readonly boardConfirmationService:
+      BoardPaymentConfirmationService =
+        new BoardPaymentConfirmationService(),
   ) {}
 
   async processSignedEvent(
@@ -199,7 +211,6 @@ export class PaymentProviderEventsService {
 
       if (
         !application ||
-        application.kind !== 'ORDINARY' ||
         payment.method !== 'ONLINE' ||
         payment.provider !== event.provider ||
         attempt.provider !== event.provider
@@ -208,7 +219,8 @@ export class PaymentProviderEventsService {
           'Invalid online membership payment.',
         );
       }
-
+const isBoardNomination =
+  application.kind === 'BOARD_ONBOARDING';
       /*
        * The provider event ID must only be processed
        * once. A reused ID with a different payload
@@ -385,7 +397,8 @@ export class PaymentProviderEventsService {
         application.status === 'PAYMENT_PROCESSING' &&
         payment.status === 'PROCESSING';
 
-        const eligibleExpiredReconciliation =
+       const eligibleExpiredReconciliation =
+  !isBoardNomination &&
   attempt.status === 'EXPIRED' &&
 
   application.status === 'EXPIRED' &&
@@ -540,22 +553,36 @@ export class PaymentProviderEventsService {
 
         let canRetry = false;
 
-        try {
-            await assertOrdinaryApplicationPayable(
-                tx,
-                {
-                    ...application,
-                    status: 'PENDING_PAYMENT',
-                },
-                processedAt,
-                );
+try {
+  if (isBoardNomination) {
+    await assertBoardNominationPayable(
+      tx,
+      application,
+      processedAt,
+      {
+        allowProcessing: true,
+      },
+    );
+  } else {
+    await assertOrdinaryApplicationPayable(
+      tx,
+      {
+        ...application,
+        status: 'PENDING_PAYMENT',
+      },
+      processedAt,
+    );
+  }
 
-          canRetry = true;
-        } catch (error) {
-          if (!(error instanceof ConflictException)) {
-            throw error;
-          }
-        }
+  canRetry = true;
+} catch (error) {
+  if (
+    !(error instanceof ConflictException) &&
+    !(error instanceof BadRequestException)
+  ) {
+    throw error;
+  }
+}
 
         await tx.payment.update({
           where: {
@@ -568,23 +595,42 @@ export class PaymentProviderEventsService {
         });
 
         await tx.membershipApplication.update({
-          where: {
-            id: application.id,
-          },
+  where: {
+    id: application.id,
+  },
 
-          data: {
-            status: canRetry
-              ? 'PENDING_PAYMENT'
-              : 'EXPIRED',
+  data: {
+    status: canRetry
+      ? 'PENDING_PAYMENT'
+      : 'EXPIRED',
 
-            processingGraceEndsAt:
-              null,
+    processingGraceEndsAt:
+      null,
 
-            endReason: canRetry
-              ? null
-              : 'PAYMENT_FAILED',
-          },
-        });
+    endReason: canRetry
+      ? null
+      : 'PAYMENT_FAILED',
+  },
+});
+if (isBoardNomination) {
+  await tx.boardNomination.updateMany({
+    where: {
+      id: application.boardNominationId!,
+
+      status: 'PAYMENT_PROCESSING',
+    },
+
+    data: {
+      status: canRetry
+        ? 'PENDING_PAYMENT'
+        : 'EXPIRED',
+
+      expiredAt: canRetry
+        ? null
+        : processedAt,
+    },
+  });
+}
 
         await finishEvent(
           'APPLIED',
@@ -679,6 +725,22 @@ export class PaymentProviderEventsService {
                 null,
             },
           });
+
+          if (isBoardNomination) {
+  await tx.boardNomination.updateMany({
+    where: {
+      id: application.boardNominationId!,
+
+      status: 'PAYMENT_PROCESSING',
+    },
+
+    data: {
+      status: 'EXPIRED',
+
+      expiredAt: processedAt,
+    },
+  });
+}
         }
 
         await finishEvent(
@@ -767,17 +829,22 @@ if (eligibleExpiredReconciliation) {
       }
 
       if (
-        !club.membershipSettings ||
-        club.membershipSettings.registrationMode !==
-          application.registrationModeAtSubmission
-      ) {
-        return markRefundRequired(
-          'Registration policy has changed.',
-        );
-      }
+  !isBoardNomination &&
+  (
+    !club.membershipSettings ||
+    club.membershipSettings.registrationMode !==
+      application.registrationModeAtSubmission
+  )
+) {
+  return markRefundRequired(
+    'Registration policy has changed.',
+  );
+}
 
       let effectiveGraceCutoff =
-        attempt.processingGraceEndsAt;
+  isBoardNomination
+    ? application.paymentDeadlineAt
+    : attempt.processingGraceEndsAt;
 
       if (application.processingGraceEndsAt) {
         effectiveGraceCutoff = new Date(
@@ -793,9 +860,10 @@ if (eligibleExpiredReconciliation) {
        * original grace cutoff.
        */
       if (
-        application.registrationModeAtSubmission ===
-        'WINDOWED'
-      ) {
+  !isBoardNomination &&
+  application.registrationModeAtSubmission ===
+    'WINDOWED'
+) {
         if (!application.registrationWindowId) {
           return markRefundRequired(
             'Original registration window missing.',
@@ -891,6 +959,116 @@ if (eligibleExpiredReconciliation) {
           'Applicant is no longer academically eligible.',
         );
       }
+
+      /*
+ * Board nomination success uses the exceptional
+ * membership activation and qualification workflow.
+ */
+if (isBoardNomination) {
+  /*
+   * Perform all expected business validation before
+   * attempting financial state changes.
+   */
+  try {
+    await assertBoardNominationPayable(
+      tx,
+      application,
+      processedAt,
+      {
+        allowProcessing: true,
+
+        paymentOccurredAt:
+          event.occurredAt,
+      },
+    );
+  } catch (error) {
+    if (
+      error instanceof ConflictException ||
+      error instanceof BadRequestException
+    ) {
+      return markRefundRequired(
+        'Nomination no longer qualifies for membership and board appointment.',
+      );
+    }
+
+    throw error;
+  }
+
+  /*
+   * Finalize membership, payment, nomination
+   * and official board appointment atomically.
+   */
+  const result =
+    await this.boardConfirmationService.confirmBoardPayment(
+      tx,
+      {
+        application,
+
+        payment,
+
+        confirmedAt:
+          event.occurredAt,
+
+        confirmedByAccountId:
+          null,
+
+        qualificationAt:
+          processedAt,
+      },
+    );
+
+  await tx.paymentAttempt.update({
+    where: {
+      id: attempt.id,
+    },
+
+    data: {
+      status: 'SUCCEEDED',
+
+      providerEventAt:
+        event.occurredAt,
+
+      receivedAt,
+
+      resolvedAt:
+        processedAt,
+
+      providerPayloadDigest:
+        payloadDigest,
+    },
+  });
+
+  await finishEvent(
+    'APPLIED',
+
+    'Online nomination payment confirmed and board appointment qualified.',
+  );
+
+  return {
+    duplicate: false,
+
+    eventStatus:
+      'APPLIED',
+
+    applicationStatus:
+      result.application.status,
+
+    paymentStatus:
+      result.payment.status,
+
+    attemptStatus:
+      'SUCCEEDED',
+
+    membership:
+      result.membership,
+
+    nomination:
+      result.nomination,
+
+    appointment:
+      result.appointment,
+  };
+}
 
       const expiresAt =
         calculateMembershipExpiration(

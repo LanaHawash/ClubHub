@@ -355,6 +355,9 @@ async findOneForDeanship(id: string) {
       membershipSettings: true,
 
 membershipFeeVersions: {
+  where: {
+    purpose: 'STANDARD',
+  },
   orderBy: {
     effectiveAt: 'desc',
   },
@@ -609,6 +612,7 @@ if (membership.registrationMode === 'ALWAYS_OPEN') {
       currency: membership.currency,
       effectiveAt: new Date(),
       createdById: assignedById ?? null,
+      purpose: 'STANDARD',
     },
   });
 } else if (membership.registrationMode === 'WINDOWED') {
@@ -850,6 +854,7 @@ async activateRegistrationWindowFees(
           renewalFee: settings.pendingRenewalFee,
           currency: settings.currency,
           effectiveAt: registrationWindow.opensAt,
+          purpose: 'STANDARD',
         },
       });
 
@@ -1237,22 +1242,23 @@ private async resolveMembershipAvailabilityOnce(
 
 if (registrationMode === 'ALWAYS_OPEN') {
   const latestVersion =
-    await this.prisma.clubMembershipFeeVersion.findFirst({
-      where: {
-        clubId,
-        effectiveAt: {
-          lte: now,
-        },
+  await this.prisma.clubMembershipFeeVersion.findFirst({
+    where: {
+      clubId,
+      purpose: 'STANDARD',
+      effectiveAt: {
+        lte: now,
       },
-      orderBy: [
-        { effectiveAt: 'desc' },
-        { createdAt: 'desc' },
-        { id: 'desc' },
-      ],
-      select: {
-        id: true,
-      },
-    });
+    },
+    orderBy: [
+      { effectiveAt: 'desc' },
+      { createdAt: 'desc' },
+      { id: 'desc' },
+    ],
+    select: {
+      id: true,
+    },
+  });
 
   if (!latestVersion) {
     throw new ConflictException(

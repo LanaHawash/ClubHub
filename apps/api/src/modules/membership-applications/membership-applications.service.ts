@@ -325,6 +325,7 @@ if (pendingApplication) {
             await tx.clubMembershipFeeVersion.findFirst({
               where: {
                 clubId,
+                purpose: 'STANDARD',
                 effectiveAt: { lte: now },
               },
               orderBy: [
@@ -393,6 +394,7 @@ if (pendingApplication) {
             where: {
               id: feeVersionId,
               clubId,
+              purpose: 'STANDARD',
             },
           });
 

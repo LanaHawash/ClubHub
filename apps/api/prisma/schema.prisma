@@ -116,6 +116,11 @@ enum PaymentProviderEventStatus {
   RECONCILIATION_REQUIRED
 }
 
+enum MembershipFeeVersionPurpose {
+  STANDARD
+  BOARD_ONBOARDING
+}
+
 model Faculty {
   id          String              @id @default(uuid()) @db.Uuid
   name        String              @unique @db.VarChar(150)
@@ -515,10 +520,10 @@ model ClubMembershipFeeVersion {
 
   currency String @db.VarChar(3)
 
-  effectiveAt DateTime @db.Timestamptz(6)
-
-  createdById String?  @db.Uuid
-  createdBy   Account? @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  effectiveAt DateTime                    @db.Timestamptz(6)
+  purpose     MembershipFeeVersionPurpose @default(STANDARD)
+  createdById String?                     @db.Uuid
+  createdBy   Account?                    @relation(fields: [createdById], references: [id], onDelete: Restrict)
 
   windows      ClubRegistrationWindow[]
   applications MembershipApplication[]

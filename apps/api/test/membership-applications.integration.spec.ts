@@ -63,6 +63,14 @@ import {
 import {
   evaluateBoardMembershipCoverage,
 } from '../src/shared/membership/board-membership-coverage';
+import {
+  BoardAppointmentsService,
+} from '../src/modules/clubs/board-appointments.service';
+
+import {
+  getLocalBoardDate,
+  addBoardCalendarDays,
+} from '../src/shared/membership/board-term';
 
 describe('Sprint 6.C - Membership applications integration', () => {
   let prisma: PrismaService;
@@ -5785,6 +5793,679 @@ describe('Sprint 6.G - Board membership coverage', () => {
         '2026-12-02T22:00:00.000Z',
       ),
     );
+  });
+});
+describe('Sprint 6.G - Direct appointments and provisional nominations', () => {
+  async function createBoardFixture(
+    registrationMode:
+      | 'ALWAYS_OPEN'
+      | 'WINDOWED' = 'ALWAYS_OPEN',
+  ) {
+    const club =
+      await createClub(
+        registrationMode,
+      );
+
+    const { student, account } =
+      await createStudent();
+
+    const deanship =
+      await prisma.account.create({
+        data: {
+          email:
+            `board-deanship-${uniqueSuffix()}@example.com`,
+
+          passwordHash:
+            'integration-test-only',
+
+          role:
+            'DEANSHIP',
+
+          status:
+            'ACTIVE',
+        },
+      });
+
+    const boardService =
+      new BoardAppointmentsService(
+        prisma,
+        new ClubEligibilityService(prisma),
+      );
+
+    const today =
+      getLocalBoardDate(
+        new Date(),
+      );
+
+    const dto = {
+      studentId:
+        student.id,
+
+      position:
+        'President',
+
+      startDate:
+        today.toISOString().slice(0, 10),
+
+      endDate:
+        addBoardCalendarDays(
+          today,
+          90,
+        ).toISOString().slice(0, 10),
+    };
+
+    return {
+      club,
+      student,
+      account,
+      deanship,
+      boardService,
+      dto,
+    };
+  }
+
+  // TEST 1
+  it('creates a direct appointment when membership covers the entire board term', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await prisma.membership.create({
+      data: {
+        clubId:
+          fixture.club.id,
+
+        studentId:
+          fixture.student.id,
+
+        activatedAt:
+          new Date(
+            Date.now() - DAY_MS,
+          ),
+
+        expiresAt:
+          new Date(
+            Date.now() + 300 * DAY_MS,
+          ),
+      },
+    });
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'DIRECT_APPOINTMENT',
+    );
+
+    expect(result.appointment).not.toBeNull();
+
+    expect(result.nomination).toBeNull();
+
+    expect(result.application).toBeNull();
+
+    expect(
+      await prisma.boardAppointment.count({
+        where: {
+          clubId:
+            fixture.club.id,
+
+          studentId:
+            fixture.student.id,
+        },
+      }),
+    ).toBe(1);
+
+    expect(
+      await prisma.boardNomination.count({
+        where: {
+          clubId:
+            fixture.club.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 2
+  it('creates a provisional nomination for a candidate without membership', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    expect(result.appointment).toBeNull();
+
+    expect(result.nomination?.status).toBe(
+      'PENDING_PAYMENT',
+    );
+
+    expect(result.nomination?.reason).toBe(
+      'NO_MEMBERSHIP',
+    );
+
+    expect(result.application?.kind).toBe(
+      'BOARD_ONBOARDING',
+    );
+
+    expect(result.application?.feeType).toBe(
+      'FIRST_TIME',
+    );
+
+    expect(result.application?.quotedAmount).toBe(
+      '30.00',
+    );
+
+    expect(
+      result.application?.boardNominationId,
+    ).toBe(
+      result.nomination?.id,
+    );
+  });
+
+  // TEST 3
+  it('sets a nomination payment deadline exactly 72 hours after nomination', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    const nomination =
+      result.nomination!;
+
+    const application =
+      result.application!;
+
+    expect(
+      nomination.deadlineAt.getTime() -
+      nomination.nominatedAt.getTime(),
+    ).toBe(
+      72 * 60 * MINUTE_MS,
+    );
+
+    expect(
+      application.paymentDeadlineAt,
+    ).toEqual(
+      nomination.deadlineAt,
+    );
+
+    expect(
+      application.originalDeadlineAt,
+    ).toEqual(
+      nomination.deadlineAt,
+    );
+  });
+
+  // TEST 4
+  it('does not create membership or official leadership for an unpaid nominee', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await fixture.boardService.create(
+      fixture.club.id,
+      fixture.dto,
+      fixture.deanship.id,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          clubId:
+            fixture.club.id,
+
+          studentId:
+            fixture.student.id,
+        },
+      }),
+    ).toBe(0);
+
+    expect(
+      await prisma.boardAppointment.count({
+        where: {
+          clubId:
+            fixture.club.id,
+
+          studentId:
+            fixture.student.id,
+        },
+      }),
+    ).toBe(0);
+
+    expect(
+      await prisma.clubAdminAssignment.count({
+        where: {
+          clubId:
+            fixture.club.id,
+
+          accountId:
+            fixture.account.id,
+        },
+      }),
+    ).toBe(0);
+
+    const leadership =
+      await fixture.boardService.current(
+        fixture.club.id,
+      );
+
+    expect(leadership).toEqual([]);
+  });
+
+  // TEST 5
+  it('permits board nomination while ordinary registration is closed', async () => {
+    const fixture =
+      await createBoardFixture(
+        'WINDOWED',
+      );
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    expect(
+      result.application?.registrationWindowId,
+    ).toBeNull();
+
+    expect(
+      result.application?.quotedAmount,
+    ).toBe('30.00');
+
+    const fee =
+      await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+        where: {
+          id:
+            result.application!.feeVersionId,
+        },
+      });
+
+    expect(fee.purpose).toBe(
+      'BOARD_ONBOARDING',
+    );
+  });
+
+  // TEST 6
+  it('uses renewal pricing for a candidate with expired membership history', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await prisma.membership.create({
+      data: {
+        clubId:
+          fixture.club.id,
+
+        studentId:
+          fixture.student.id,
+
+        activatedAt:
+          new Date(
+            Date.now() - 400 * DAY_MS,
+          ),
+
+        expiresAt:
+          new Date(
+            Date.now() - 35 * DAY_MS,
+          ),
+      },
+    });
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    expect(result.application?.feeType).toBe(
+      'RENEWAL',
+    );
+
+    expect(result.application?.quotedAmount).toBe(
+      '20.00',
+    );
+
+    expect(
+      result.outcome === 'NOMINATION_CREATED' &&
+      result.membershipPlan.activationMode,
+    ).toBe('IMMEDIATE');
+  });
+
+  // TEST 7
+  it('plans prepaid renewal when existing membership expires during the board term', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const expiry =
+      new Date(
+        Date.now() + 30 * DAY_MS,
+      );
+
+    await prisma.membership.create({
+      data: {
+        clubId:
+          fixture.club.id,
+
+        studentId:
+          fixture.student.id,
+
+        activatedAt:
+          new Date(
+            Date.now() - 335 * DAY_MS,
+          ),
+
+        expiresAt:
+          expiry,
+      },
+    });
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    if (result.outcome !== 'NOMINATION_CREATED') {
+      throw new Error(
+        'Expected nomination outcome.',
+      );
+    }
+
+    expect(result.nomination.reason).toBe(
+      'INSUFFICIENT_COVERAGE',
+    );
+
+    expect(
+      result.membershipPlan.activationMode,
+    ).toBe('PREPAID_RENEWAL');
+
+    expect(
+      result.membershipPlan.projectedActivatedAt,
+    ).toEqual(expiry);
+
+    expect(
+      result.application.feeType,
+    ).toBe('RENEWAL');
+  });
+
+  // TEST 8
+  it('rejects appointment creation by an ordinary student', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await expect(
+      fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.account.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  // TEST 9
+  it('prevents duplicate provisional nominations', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await fixture.boardService.create(
+      fixture.club.id,
+      fixture.dto,
+      fixture.deanship.id,
+    );
+
+    await expect(
+      fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
+    expect(
+      await prisma.boardNomination.count({
+        where: {
+          clubId:
+            fixture.club.id,
+
+          studentId:
+            fixture.student.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 10
+  it('does not create a competing nomination when the candidate already has an ordinary application', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await applicationsService.createOrdinaryApplication(
+      fixture.account.id,
+      fixture.club.id,
+    );
+
+    await expect(
+      fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code:
+          'BOARD_CANDIDATE_HAS_LIVE_APPLICATION',
+      },
+    });
+
+    expect(
+      await prisma.boardNomination.count({
+        where: {
+          clubId:
+            fixture.club.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 11
+  it('prevents nomination fee snapshots from affecting ordinary membership prices', async () => {
+  const fixture =
+    await createBoardFixture();
+
+  const nomination =
+    await fixture.boardService.create(
+      fixture.club.id,
+      fixture.dto,
+      fixture.deanship.id,
+    );
+
+  /*
+   * Create a separate exceptional fee version
+   * instead of modifying an immutable version.
+   */
+  const exceptionalVersion =
+    await prisma.clubMembershipFeeVersion.create({
+      data: {
+        clubId: fixture.club.id,
+
+        purpose: 'BOARD_ONBOARDING',
+
+        firstTimeFee: '99.00',
+
+        renewalFee: '89.00',
+
+        currency: 'ILS',
+
+        effectiveAt: new Date(),
+
+        createdById: fixture.deanship.id,
+      },
+    });
+
+  /*
+   * Verify ordinary registration availability
+   * ignores exceptional membership fees.
+   */
+  const availability =
+    await clubsService.getMembershipAvailability(
+      fixture.club.id,
+    );
+
+  expect(
+    availability.effectiveFees?.firstTimeFee,
+  ).toBe('30.00');
+
+  expect(
+    availability.effectiveFees?.renewalFee,
+  ).toBe('20.00');
+
+  expect(
+    availability.effectiveFees?.feeVersionId,
+  ).not.toBe(exceptionalVersion.id);
+
+  const anotherStudent =
+    await createStudent();
+
+  /*
+   * Verify the student-facing membership quote.
+   */
+  const quote =
+    await clubsService.getMembershipQuoteForAccount(
+      anotherStudent.account.id,
+      fixture.club.id,
+      true,
+    );
+
+  expect(quote.amount).toBe('30.00');
+
+  /*
+   * Verify actual application creation uses
+   * the ordinary fee version.
+   */
+  const ordinary =
+    await applicationsService.createOrdinaryApplication(
+      anotherStudent.account.id,
+      fixture.club.id,
+    );
+
+  expect(
+    ordinary.application.quotedAmount,
+  ).toBe('30.00');
+
+  expect(
+    ordinary.application.feeVersionId,
+  ).not.toBe(
+    nomination.application!.feeVersionId,
+  );
+
+  expect(
+    ordinary.application.feeVersionId,
+  ).not.toBe(exceptionalVersion.id);
+
+  const selectedVersion =
+    await prisma.clubMembershipFeeVersion.findUniqueOrThrow({
+      where: {
+        id: ordinary.application.feeVersionId,
+      },
+    });
+
+  expect(selectedVersion.purpose).toBe(
+    'STANDARD',
+  );
+
+  /*
+   * Deanship's ordinary fee history must also
+   * exclude exceptional versions.
+   */
+  const clubDetails =
+    await clubsService.findOneForDeanship(
+      fixture.club.id,
+    );
+
+  expect(
+    clubDetails.membershipFeeVersions.every(
+      version => version.purpose === 'STANDARD',
+    ),
+  ).toBe(true);
+});
+
+  // TEST 12
+  it('serializes simultaneous nomination requests for the same candidate', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const results =
+      await Promise.allSettled([
+        fixture.boardService.create(
+          fixture.club.id,
+          fixture.dto,
+          fixture.deanship.id,
+        ),
+
+        fixture.boardService.create(
+          fixture.club.id,
+          fixture.dto,
+          fixture.deanship.id,
+        ),
+      ]);
+
+    expect(
+      results.filter(
+        result =>
+          result.status === 'fulfilled',
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      results.filter(
+        result =>
+          result.status === 'rejected',
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      await prisma.boardNomination.count({
+        where: {
+          clubId:
+            fixture.club.id,
+        },
+      }),
+    ).toBe(1);
   });
 });
 });

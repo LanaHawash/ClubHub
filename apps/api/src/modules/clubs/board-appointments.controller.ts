@@ -16,7 +16,23 @@ export class BoardAppointmentsController {
   constructor(private readonly boards: BoardAppointmentsService) {}
   @Get('clubs/:id/board') current(@Param('id', ParseUUIDPipe) id: string) { return this.boards.current(id); }
   @Get('clubs/:id/board/history') history(@Param('id', ParseUUIDPipe) id: string) { return this.boards.history(id); }
-  @Post('clubs/:id/board') create(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateBoardAppointmentDto) { return this.boards.create(id, dto); }
+  @Post('clubs/:id/board')
+create(
+  @Param('id', ParseUUIDPipe)
+  id: string,
+
+  @Body()
+  dto: CreateBoardAppointmentDto,
+
+  @Req()
+  request: AuthenticatedRequest,
+) {
+  return this.boards.create(
+    id,
+    dto,
+    request.user.id,
+  );
+}
   @Put('board-appointments/:id') update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateBoardAppointmentDto) { return this.boards.update(id, dto); }
   @Patch('board-appointments/:id/end') end(@Param('id', ParseUUIDPipe) id: string, @Body() dto: EndBoardAppointmentDto, @Req() req: AuthenticatedRequest) { return this.boards.end(id, dto.endDate, req.user.id); }
 }

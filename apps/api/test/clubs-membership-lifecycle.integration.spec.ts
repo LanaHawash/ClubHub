@@ -7,6 +7,10 @@ import { MembershipWindowReconcilerService } from '../src/modules/clubs/membersh
 import { EventsService } from '../src/modules/events/events.service';
 import { BoardAppointmentsService } from '../src/modules/clubs/board-appointments.service';
 import { ClubEligibilityService } from '../src/modules/clubs/club-eligibility.service';
+import {
+  getLocalBoardDate,
+  addBoardCalendarDays,
+} from '../src/shared/membership/board-term';
 /**
  * REAL PostgreSQL tests. Never run on clubhub_dev.
  * Uses unique immutable fixtures; does not try to delete protected windows/fee versions.
@@ -840,6 +844,14 @@ it('prevents board appointment modifications for archived clubs', async () => {
     },
   });
 
+  const deanship = await prisma.account.create({
+  data: {
+    email: `archived-board-deanship-${run}@example.com`,
+    passwordHash: 'integration-test-only',
+    role: 'DEANSHIP',
+    status: 'ACTIVE',
+  },
+});
   const today = new Date().toISOString().slice(0, 10);
 
   // Establish an existing board appointment.
@@ -856,13 +868,18 @@ it('prevents board appointment modifications for archived clubs', async () => {
   await service.archive(club.id);
 
   // 1. Creating a new appointment must fail.
-  await expect(
-    boardService.create(club.id, {
+await expect(
+  boardService.create(
+    club.id,
+    {
       studentId: student.id,
       position: 'Vice President',
       startDate: today,
-    }),
-  ).rejects.toThrow(ConflictException);
+      endDate: today,
+    },
+    deanship.id,
+  ),
+).rejects.toThrow(ConflictException);
 
   // 2. Updating an existing appointment must fail.
   await expect(
@@ -873,13 +890,12 @@ it('prevents board appointment modifications for archived clubs', async () => {
 
   // 3. Ending an existing appointment must fail.
   await expect(
-    boardService.end(
-      appointment.id,
-      today,
-      '00000000-0000-4000-8000-000000000001',
-    ),
-  ).rejects.toThrow(ConflictException);
-
+  boardService.end(
+    appointment.id,
+    today,
+    deanship.id,
+  ),
+).rejects.toThrow(ConflictException);
   // 4. Verify no additional appointments were created.
   const appointments = await prisma.boardAppointment.findMany({
     where: {
@@ -906,120 +922,237 @@ it('prevents board appointment modifications for archived clubs', async () => {
     history.some(record => record.id === appointment.id),
   ).toBe(true);
 });
-it('rejects board creation when a club is archived between validation and transaction', async () => {
-  const club = await service.create(dto('board-archive-race'));
+it('rejects board creation when the club is archived before the appointment transaction begins', async () => {
+  const club =
+    await service.create(
+      dto('board-archive-race'),
+    );
 
-  const boardService = new BoardAppointmentsService(
-    prisma,
-    new ClubEligibilityService(prisma),
-  );
+  const boardService =
+    new BoardAppointmentsService(
+      prisma,
+      new ClubEligibilityService(prisma),
+    );
 
-  // Create an isolated eligible student.
-  const faculty = await prisma.faculty.create({
-    data: {
-      name: `Race test faculty ${run}`,
-    },
-  });
+  const faculty =
+    await prisma.faculty.create({
+      data: {
+        name: `Race test faculty ${run}`,
+      },
+    });
 
-  const major = await prisma.major.create({
-    data: {
-      name: 'Race Test Major',
-      facultyId: faculty.id,
-    },
-  });
+  const major =
+    await prisma.major.create({
+      data: {
+        name: 'Race Test Major',
 
-  const student = await prisma.universityStudent.create({
-    data: {
-      universityId: `R${Date.now().toString(36)}`,
-      email: `race-${run}@example.com`,
-      fullName: 'Race Test Student',
-      majorId: major.id,
-    },
-  });
+        facultyId: faculty.id,
+      },
+    });
+
+  const student =
+    await prisma.universityStudent.create({
+      data: {
+        universityId:
+          `R${Date.now().toString(36)}`,
+
+        email:
+          `race-${run}@example.com`,
+
+        fullName:
+          'Race Test Student',
+
+        majorId:
+          major.id,
+      },
+    });
 
   await prisma.account.create({
     data: {
       email: student.email,
-      passwordHash: 'integration-test-only',
+
+      passwordHash:
+        'integration-test-only',
+
       role: 'STUDENT',
+
       status: 'ACTIVE',
-      universityStudentId: student.id,
+
+      universityStudentId:
+        student.id,
     },
   });
 
-const initialValidationFinished = deferred();
-const continueCreation = deferred();
+  /*
+   * The Sprint 6 board service requires
+   * an authenticated Deanship actor.
+   */
+  const deanship =
+    await prisma.account.create({
+      data: {
+        email:
+          `race-deanship-${run}@example.com`,
 
-// Pause after eligibility validation completes,
-// immediately before the database transaction begins.
-const target = boardService as unknown as {
-  assertEligible: (
-    accountId: string,
-    clubId: string
-  ) => Promise<void>;
-};
+        passwordHash:
+          'integration-test-only',
 
-const originalAssertEligible =
-  target.assertEligible.bind(boardService);
+        role: 'DEANSHIP',
 
-const spy = jest
-  .spyOn(target, 'assertEligible')
-  .mockImplementation(async (accountId, clubId) => {
-    // Complete the real eligibility validation first.
-    await originalAssertEligible(accountId, clubId);
-
-    // Signal that all initial validations have passed.
-    initialValidationFinished.resolve();
-
-    // Hold execution immediately before the transaction.
-    await continueCreation.promise;
-  });
-
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-
-    const creationAttempt = boardService.create(club.id, {
-      studentId: student.id,
-      position: 'President',
-      startDate: today,
+        status: 'ACTIVE',
+      },
     });
 
-    // Observe the request after initial validation.
-    await initialValidationFinished.promise;
+  const today =
+    getLocalBoardDate(
+      new Date(),
+    );
 
-    // Archive the club before allowing creation to continue.
-    await service.archive(club.id);
+  const endDate =
+    addBoardCalendarDays(
+      today,
+      90,
+    );
 
-    // The appointment request continues with stale
-    // information from its first status check.
-    continueCreation.resolve();
+  /*
+   * Establish sufficient membership coverage.
+   * Without archiving, this request would create
+   * a valid direct appointment.
+   */
+  await prisma.membership.create({
+    data: {
+      clubId: club.id,
 
-    // The transaction-level status check must reject it.
-    await expect(creationAttempt).rejects.toThrow(
+      studentId: student.id,
+
+      activatedAt: new Date(
+        Date.now() -
+          24 * 60 * 60 * 1000,
+      ),
+
+      expiresAt: new Date(
+        Date.now() +
+          300 * 24 * 60 * 60 * 1000,
+      ),
+    },
+  });
+
+  const transactionReached = deferred();
+
+  const continueCreation = deferred();
+
+  /*
+   * Pause the appointment request immediately
+   * before its transaction begins.
+   *
+   * Unlike the old test, this does not depend
+   * on private eligibility validation methods.
+   */
+  const originalTransaction =
+    prisma.$transaction.bind(prisma);
+
+  const spy = jest
+    .spyOn(prisma, '$transaction')
+    .mockImplementationOnce(
+      (async (...args: any[]) => {
+        transactionReached.resolve();
+
+        await continueCreation.promise;
+
+        return (
+          originalTransaction as any
+        )(...args);
+      }) as any,
+    );
+
+  const creationAttempt =
+    boardService.create(
+      club.id,
+      {
+        studentId: student.id,
+
+        position: 'President',
+
+        startDate:
+          today.toISOString().slice(0, 10),
+
+        endDate:
+          endDate.toISOString().slice(0, 10),
+      },
+      deanship.id,
+    );
+
+  /*
+   * Attach rejection handling immediately.
+   */
+  const rejection =
+    expect(creationAttempt).rejects.toThrow(
       ConflictException,
     );
 
-    // Nothing should have been inserted.
-    const appointments = await prisma.boardAppointment.findMany({
-      where: {
-        clubId: club.id,
-      },
-    });
+  try {
+    await transactionReached.promise;
+
+    /*
+     * Archive the club while the appointment
+     * request is paused.
+     */
+    await service.archive(club.id);
+
+    continueCreation.resolve();
+
+    /*
+     * The board transaction must recheck
+     * the authoritative club status.
+     */
+    await rejection;
+
+    const appointments =
+      await prisma.boardAppointment.findMany({
+        where: {
+          clubId: club.id,
+        },
+      });
 
     expect(appointments).toHaveLength(0);
 
-    const persistedClub = await prisma.club.findUniqueOrThrow({
-      where: {
-        id: club.id,
-      },
-    });
+    const nominations =
+      await prisma.boardNomination.findMany({
+        where: {
+          clubId: club.id,
+        },
+      });
 
-    expect(persistedClub.status).toBe('ARCHIVED');
+    expect(nominations).toHaveLength(0);
+
+    const applications =
+      await prisma.membershipApplication.findMany({
+        where: {
+          clubId: club.id,
+        },
+      });
+
+    expect(applications).toHaveLength(0);
+
+    const persistedClub =
+      await prisma.club.findUniqueOrThrow({
+        where: {
+          id: club.id,
+        },
+      });
+
+    expect(persistedClub.status).toBe(
+      'ARCHIVED',
+    );
   } finally {
     continueCreation.resolve();
+
     spy.mockRestore();
+
+    await creationAttempt.catch(
+      () => undefined,
+    );
   }
-});
+}, 15000);
 it('extends an active registration window without changing its identity or locked fees', async () => {
   const { clubId, windowId } =
     await createActiveWindow('active-extension');

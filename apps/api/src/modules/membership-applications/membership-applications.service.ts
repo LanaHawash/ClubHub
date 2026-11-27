@@ -25,6 +25,7 @@ import {
 } from '../../shared/membership/membership-time';
 import {
   reconcileOrdinaryApplication,
+  reconcileStudentClubApplications,
 } from '../../shared/membership/membership-lifecycle';
 
 @Injectable()
@@ -68,10 +69,20 @@ export class MembershipApplicationsService {
      * Do this before opening our transaction because
      * the existing resolver manages its own transactions.
      */
-    await this.clubsService.getMembershipAvailability(clubId);
+await this.clubsService.getMembershipAvailability(clubId);
 
-    try {
-      return await this.prisma.$transaction(async (tx) => {
+/*
+ * Reconcile expired ordinary applications and board
+ * nominations before acquiring transaction locks.
+ */
+await reconcileStudentClubApplications(
+  this.prisma,
+  initialAccount.universityStudentId,
+  clubId,
+);
+
+try {
+  return await this.prisma.$transaction(async (tx) => {
         await lockMembershipClub(tx, clubId);
 
         const club = await tx.club.findUnique({
@@ -136,7 +147,7 @@ export class MembershipApplicationsService {
 
         const studentId = account.universityStudentId;
 
-        let windowId: string | null = null;
+let windowId: string | null = null;
 
         /*
          * Resolve and lock the applicable registration window.

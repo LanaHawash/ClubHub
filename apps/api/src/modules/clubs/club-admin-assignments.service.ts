@@ -9,25 +9,63 @@ import { AccountRole, AccountStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { AssignClubAdminDto } from './dto/assign-club-admin.dto';
 import type { Prisma } from '../../generated/prisma/client';
-
+import {
+  getLocalBoardDate,
+} from '../../shared/membership/board-term';
 @Injectable()
 export class ClubAdminAssignmentsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // Both scheduled dates are inclusive. Manual termination is immediate.
-  private boardIsCurrent(startDate: Date, endDate: Date | null, endedAt: Date | null): boolean {
-    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
-    return !endedAt && startDate <= today && (!endDate || endDate >= today);
-  }
+private boardIsCurrent(
+  startDate: Date,
+
+  endDate: Date | null,
+
+  endedAt: Date | null,
+): boolean {
+  const today =
+    getLocalBoardDate(
+      new Date(),
+    );
+
+  return (
+    !endedAt &&
+
+    startDate <= today &&
+
+    (
+      !endDate ||
+      endDate >= today
+    )
+  );
+}
 
   private currentBoardWhere() {
-    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
-    return {
-      endedAt: null,
-      startDate: { lte: today },
-      OR: [{ endDate: null }, { endDate: { gte: today } }],
-    };
-  }
+  const today =
+    getLocalBoardDate(
+      new Date(),
+    );
+
+  return {
+    endedAt: null,
+
+    startDate: {
+      lte: today,
+    },
+
+    OR: [
+      {
+        endDate: null,
+      },
+
+      {
+        endDate: {
+          gte: today,
+        },
+      },
+    ],
+  };
+}
 
   private async assertActiveDeanship(accountId: string) {
     const account = await this.prisma.account.findUnique({
@@ -88,6 +126,39 @@ export class ClubAdminAssignmentsService {
           !account || account.role !== AccountRole.STUDENT || account.status !== AccountStatus.ACTIVE) {
         throw new BadRequestException('Select a current board member with an active ClubHub student account.');
       }
+      /*
+ * Serialize administrator assignment for the
+ * same account, including requests from
+ * different clubs.
+ */
+await tx.$queryRaw<{ id: string }[]>`
+  SELECT "id"
+  FROM "Account"
+  WHERE "id" = ${account.id}::uuid
+  FOR UPDATE
+`;
+
+const currentAccount =
+  await tx.account.findUniqueOrThrow({
+    where: {
+      id: account.id,
+    },
+
+    select: {
+      role: true,
+
+      status: true,
+    },
+  });
+
+if (
+  currentAccount.role !== AccountRole.STUDENT ||
+  currentAccount.status !== AccountStatus.ACTIVE
+) {
+  throw new BadRequestException(
+    'The selected board member no longer has an active student account.',
+  );
+}
       // Count only effective administrators. Expired terms no longer reserve a position.
       const active = await tx.clubAdminAssignment.findMany({
         where: { revokedAt: null, club: { status: 'ACTIVE' }, boardAppointment: { is: this.currentBoardWhere() } },

@@ -42,6 +42,26 @@ import {
 import {
   withdrawClubBoardNominations,
 } from '../../shared/membership/board-nomination-lifecycle';
+import {
+  ForbiddenException,
+} from '@nestjs/common';
+
+import {
+  validateNewBoardTerm,
+  resolveBoardCoveragePeriod,
+} from '../../shared/membership/board-term';
+
+import {
+  planBoardMembershipPurchase,
+} from '../../shared/membership/board-membership-plan';
+
+import {
+  createBoardMembershipFeeSnapshot,
+} from '../../shared/membership/board-membership-fee';
+
+import {
+  calculateNominationDeadline,
+} from '../../shared/membership/membership-time';
 
 @Injectable()
 export class ClubsService {
@@ -413,7 +433,37 @@ registrationWindows: {
 
   async create(dto: CreateClubDto, assignedById?: string) {
   const membership = dto.membership;
+const initialBoard = dto.boardMembers ?? [];
 
+const initialAdministrators =
+  dto.administrators ?? [];
+
+if (initialAdministrators.length > 0) {
+  throw new ConflictException({
+    code: 'INITIAL_ADMIN_ASSIGNMENT_NOT_ALLOWED',
+
+    message:
+      'Initial board candidates must qualify through membership payment before administrator access can be assigned.',
+  });
+}
+
+if (initialBoard.length > 0 && !assignedById) {
+  throw new ForbiddenException(
+    'An authenticated Deanship account is required to nominate initial board members.',
+  );
+}
+
+if (
+  new Set(
+    initialBoard.map(
+      member => member.studentId,
+    ),
+  ).size !== initialBoard.length
+) {
+  throw new BadRequestException(
+    'A student may appear only once in the initial board.',
+  );
+}
 if (!membership) {
   throw new BadRequestException(
     'Membership configuration is required.',
@@ -656,69 +706,308 @@ if (membership.registrationMode === 'ALWAYS_OPEN') {
     },
   });
 }
-    // The form's board selections are held in React until this transaction.
-    // Every appointment and administrator is committed atomically with the club.
-    const board = dto.boardMembers ?? [];
-    const admins = dto.administrators ?? [];
-    if (admins.length && !assignedById) throw new BadRequestException('Authenticated Deanship account required.');
-    if (admins.length > 2 || new Set(admins.map((a) => a.position)).size !== admins.length ||
-        new Set(admins.map((a) => a.boardIndex)).size !== admins.length) {
-      throw new BadRequestException('Choose at most one distinct board member for each administrator position.');
+/*
+ * Sprint 6:
+ *
+ * Initial board candidates become provisional
+ * nominations, not official board appointments.
+ */
+
+if (initialBoard.length > 0) {
+  const actor =
+    await tx.account.findUnique({
+      where: {
+        id: assignedById!,
+      },
+
+      select: {
+        role: true,
+        status: true,
+      },
+    });
+
+  if (
+    !actor ||
+    actor.role !== AccountRole.DEANSHIP ||
+    actor.status !== AccountStatus.ACTIVE
+  ) {
+    throw new ForbiddenException(
+      'Only active Deanship accounts can nominate initial board members.',
+    );
+  }
+}
+
+const nominationTime =
+  await getMembershipTransactionTime(tx);
+
+const preparedBoard =
+  initialBoard.map(entry => {
+    const position =
+      entry.position.trim();
+
+    if (
+      position.length < 2 ||
+      position.length > 100
+    ) {
+      throw new BadRequestException(
+        'Invalid initial board position.',
+      );
     }
-    if (new Set(board.map((b) => b.studentId)).size !== board.length) {
-      throw new BadRequestException('A student may appear only once in the initial board.');
-    }
-    const parseDay = (value: string) => {
-      const date = new Date(`${value}T00:00:00.000Z`);
-      if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
-        throw new BadRequestException('Invalid board appointment calendar date.');
-      }
-      return date;
+
+    const term =
+      validateNewBoardTerm(
+        entry.startDate,
+
+        entry.endDate,
+
+        nominationTime,
+      );
+
+    return {
+      entry,
+
+      position,
+
+      term,
     };
-    const currentDay = parseDay(new Date().toISOString().slice(0, 10));
-    const appointed: { id: string; accountId: string; startDate: Date; endDate: Date | null }[] = [];
-    for (const entry of board) {
-      const student = await tx.universityStudent.findUnique({
-        where: { id: entry.studentId },
-        select: { major: { select: { id: true, facultyId: true } },
-          account: { select: { id: true, role: true, status: true } } },
+  });
+
+/*
+ * Preserve the rule that overlapping president
+ * terms cannot exist.
+ */
+const presidents =
+  preparedBoard.filter(
+    member =>
+      member.position.toLowerCase() ===
+      'president',
+  );
+
+for (
+  let i = 0;
+  i < presidents.length;
+  i++
+) {
+  for (
+    let j = i + 1;
+    j < presidents.length;
+    j++
+  ) {
+    const first = presidents[i].term;
+
+    const second = presidents[j].term;
+
+    if (
+      first.startDate <= second.endDate &&
+      second.startDate <= first.endDate
+    ) {
+      throw new ConflictException({
+        code: 'BOARD_NOMINATION_OVERLAP',
+
+        message:
+          'Initial president nominations cannot have overlapping terms.',
       });
-      if (!student?.account || student.account.role !== AccountRole.STUDENT || student.account.status !== AccountStatus.ACTIVE) {
-        throw new BadRequestException('Every board member must have an active ClubHub student account.');
-      }
-      if ((dto.classification === 'FACULTY_BASED' && student.major.facultyId !== dto.facultyId) ||
-          (dto.classification === 'MAJOR_BASED' && !uniqueMajorIds.includes(student.major.id))) {
-        throw new BadRequestException('A selected board member is not eligible for this club.');
-      }
-      if (!entry.position.trim()) throw new BadRequestException('Board position is required.');
-      const startDate = parseDay(entry.startDate);
-      const endDate = entry.endDate ? parseDay(entry.endDate) : null;
-      if (endDate && endDate < startDate) throw new BadRequestException('Board end date cannot precede start date.');
-      const appointment = await tx.boardAppointment.create({
-        data: { clubId: created.id, studentId: entry.studentId, position: entry.position.trim(), startDate, endDate },
-        select: { id: true },
-      });
-      appointed.push({ id: appointment.id, accountId: student.account.id, startDate, endDate });
     }
-    for (const admin of admins) {
-      const appointment = appointed[admin.boardIndex];
-      if (!appointment) throw new BadRequestException('Select administrators from the entered board members.');
-      if (appointment.endDate && appointment.endDate < currentDay) {
-        throw new BadRequestException('An expired board appointment cannot receive administrator access.');
-      }
-      const existing = await tx.clubAdminAssignment.findFirst({
-        where: { accountId: appointment.accountId, revokedAt: null,
-          club: { status: 'ACTIVE' },
-          boardAppointment: { is: { endedAt: null,
-            OR: [{ endDate: null }, { endDate: { gte: currentDay } }] } } },
-        select: { id: true },
-      });
-      if (existing) throw new ConflictException('This student already administers another active club.');
-      await tx.clubAdminAssignment.create({ data: {
-        clubId: created.id, accountId: appointment.accountId, boardAppointmentId: appointment.id,
-        position: admin.position, assignedById: assignedById!,
-      } });
-    }
+  }
+}
+
+for (const prepared of preparedBoard) {
+  const {
+    entry,
+    position,
+    term,
+  } = prepared;
+
+  /*
+   * Preserve existing account and academic
+   * eligibility validation.
+   */
+  const student =
+    await tx.universityStudent.findUnique({
+      where: {
+        id: entry.studentId,
+      },
+
+      select: {
+        major: {
+          select: {
+            id: true,
+
+            facultyId: true,
+          },
+        },
+
+        account: {
+          select: {
+            id: true,
+
+            role: true,
+
+            status: true,
+          },
+        },
+      },
+    });
+
+  if (
+    !student?.account ||
+    student.account.role !== AccountRole.STUDENT ||
+    student.account.status !== AccountStatus.ACTIVE
+  ) {
+    throw new BadRequestException(
+      'Every board candidate must have an active ClubHub student account.',
+    );
+  }
+
+  if (
+    (
+      dto.classification === 'FACULTY_BASED' &&
+      student.major.facultyId !== dto.facultyId
+    ) ||
+
+    (
+      dto.classification === 'MAJOR_BASED' &&
+      !uniqueMajorIds.includes(
+        student.major.id,
+      )
+    )
+  ) {
+    throw new BadRequestException(
+      'A selected board candidate is not eligible for this club.',
+    );
+  }
+
+  const period =
+    await resolveBoardCoveragePeriod(
+      tx,
+
+      term,
+
+      nominationTime,
+    );
+
+  /*
+   * Ensure one membership purchase can actually
+   * cover the proposed board term.
+   */
+  const membershipPlan =
+    await planBoardMembershipPurchase(
+      tx,
+
+      created.id,
+
+      entry.studentId,
+
+      period,
+
+      nominationTime,
+    );
+
+  /*
+   * A newly created club cannot already have
+   * membership history.
+   */
+  if (
+    membershipPlan.feeType !== 'FIRST_TIME'
+  ) {
+    throw new ConflictException(
+      'Unexpected membership history for a newly created club.',
+    );
+  }
+
+  const fee =
+    await createBoardMembershipFeeSnapshot(
+      tx,
+
+      created.id,
+
+      assignedById!,
+
+      membershipPlan.feeType,
+
+      nominationTime,
+    );
+
+  const deadlineAt =
+    calculateNominationDeadline(
+      nominationTime,
+    );
+
+  const nomination =
+    await tx.boardNomination.create({
+      data: {
+        clubId: created.id,
+
+        studentId: entry.studentId,
+
+        position,
+
+        proposedStartDate:
+          term.startDate,
+
+        proposedEndDate:
+          term.endDate,
+
+        nominatedById:
+          assignedById!,
+
+        nominatedAt:
+          nominationTime,
+
+        deadlineAt,
+
+        status:
+          'PENDING_PAYMENT',
+
+        reason:
+          'NO_MEMBERSHIP',
+      },
+    });
+
+  await tx.membershipApplication.create({
+    data: {
+      clubId: created.id,
+
+      studentId: entry.studentId,
+
+      kind:
+        'BOARD_ONBOARDING',
+
+      status:
+        'PENDING_PAYMENT',
+
+      boardNominationId:
+        nomination.id,
+
+      feeType:
+        fee.feeType,
+
+      quotedAmount:
+        fee.quotedAmount,
+
+      currency:
+        fee.currency,
+
+      feeVersionId:
+        fee.feeVersionId,
+
+      registrationWindowId:
+        null,
+
+      registrationModeAtSubmission:
+        null,
+
+      submittedAt:
+        nominationTime,
+
+      originalDeadlineAt:
+        deadlineAt,
+
+      paymentDeadlineAt:
+        deadlineAt,
+    },
+  });
+}
     return created;
   });
 } catch (error) {

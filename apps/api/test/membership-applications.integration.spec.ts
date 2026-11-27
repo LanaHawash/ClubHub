@@ -8959,6 +8959,565 @@ it('does not modify a qualified nomination during lifecycle reconciliation', asy
 
 }); // Nomination lifecycle management
 
+
+describe('Final board backend hardening', () => {
+  async function createCoveredAppointment(
+    coverageDays = 180,
+  ) {
+    const fixture =
+      await createBoardFixture();
+
+    await prisma.membership.create({
+      data: {
+        clubId:
+          fixture.club.id,
+
+        studentId:
+          fixture.student.id,
+
+        activatedAt:
+          new Date(
+            Date.now() - DAY_MS,
+          ),
+
+        expiresAt:
+          new Date(
+            Date.now() +
+              coverageDays * DAY_MS,
+          ),
+      },
+    });
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    if (
+      result.outcome !==
+      'DIRECT_APPOINTMENT'
+    ) {
+      throw new Error(
+        'Expected direct board appointment.',
+      );
+    }
+
+    return {
+      ...fixture,
+
+      appointment:
+        result.appointment,
+    };
+  }
+
+  // TEST 1
+  it('creates provisional nominations instead of official appointments during club creation', async () => {
+    const { student } =
+      await createStudent();
+
+    const deanship =
+      await prisma.account.create({
+        data: {
+          email:
+            `initial-board-${uniqueSuffix()}@example.com`,
+
+          passwordHash:
+            'integration-test-only',
+
+          role: 'DEANSHIP',
+
+          status: 'ACTIVE',
+        },
+      });
+
+    const today =
+      getLocalBoardDate(
+        new Date(),
+      );
+
+    const club =
+      await clubsService.create(
+        {
+          name:
+            `Initial nomination club ${uniqueSuffix()}`,
+
+          description:
+            'Initial nomination integration test',
+
+          classification:
+            'GENERAL',
+
+          contactEmail:
+            `initial-${uniqueSuffix()}@example.com`,
+
+          boardMembers: [
+            {
+              studentId:
+                student.id,
+
+              position:
+                'President',
+
+              startDate:
+                today.toISOString().slice(0, 10),
+
+              endDate:
+                addBoardCalendarDays(
+                  today,
+
+                  90,
+                ).toISOString().slice(0, 10),
+            },
+          ],
+
+          administrators: [],
+
+          membership: {
+            registrationMode:
+              'ALWAYS_OPEN',
+
+            firstTimeFee:
+              '30.00',
+
+            renewalFee:
+              '20.00',
+
+            currency:
+              'ILS',
+          },
+        },
+
+        deanship.id,
+      );
+
+    const nominations =
+      await prisma.boardNomination.findMany({
+        where: {
+          clubId: club.id,
+        },
+
+        include: {
+          application: true,
+        },
+      });
+
+    expect(nominations).toHaveLength(1);
+
+    expect(nominations[0].status).toBe(
+      'PENDING_PAYMENT',
+    );
+
+    expect(
+      nominations[0].application?.kind,
+    ).toBe(
+      'BOARD_ONBOARDING',
+    );
+
+    expect(
+      await prisma.boardAppointment.count({
+        where: {
+          clubId: club.id,
+        },
+      }),
+    ).toBe(0);
+
+    expect(
+      await prisma.clubAdminAssignment.count({
+        where: {
+          clubId: club.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 2
+  it('rejects administrator assignment during initial club creation', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const name =
+      `Premature admin club ${uniqueSuffix()}`;
+
+    await expect(
+      clubsService.create(
+        {
+          name,
+
+          description:
+            'Premature administrator test',
+
+          classification:
+            'GENERAL',
+
+          contactEmail:
+            `premature-${uniqueSuffix()}@example.com`,
+
+          boardMembers: [
+            fixture.dto,
+          ],
+
+          administrators: [
+            {
+              boardIndex: 0,
+
+              position:
+                'PRESIDENT',
+            },
+          ],
+
+          membership: {
+            registrationMode:
+              'ALWAYS_OPEN',
+
+            firstTimeFee:
+              '30.00',
+
+            renewalFee:
+              '20.00',
+
+            currency:
+              'ILS',
+          },
+        },
+
+        fixture.deanship.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code:
+          'INITIAL_ADMIN_ASSIGNMENT_NOT_ALLOWED',
+      },
+    });
+
+    expect(
+      await prisma.club.count({
+        where: {
+          name,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 3
+  it('rejects extension beyond paid membership coverage', async () => {
+    const fixture =
+      await createCoveredAppointment(
+        120,
+      );
+
+    const extendedEndDate =
+      addBoardCalendarDays(
+        getLocalBoardDate(
+          new Date(),
+        ),
+
+        240,
+      ).toISOString().slice(0, 10);
+
+    await expect(
+      fixture.boardService.update(
+        fixture.appointment.id,
+
+        {
+          endDate:
+            extendedEndDate,
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code:
+          'BOARD_MEMBERSHIP_COVERAGE_REQUIRED',
+      },
+    });
+
+    const stored =
+      await prisma.boardAppointment.findUniqueOrThrow({
+        where: {
+          id:
+            fixture.appointment.id,
+        },
+      });
+
+    expect(stored.endDate).toEqual(
+      fixture.appointment.endDate,
+    );
+  });
+
+  // TEST 4
+  it('allows extension within existing paid membership coverage', async () => {
+    const fixture =
+      await createCoveredAppointment(
+        300,
+      );
+
+    const newEndDate =
+      addBoardCalendarDays(
+        getLocalBoardDate(
+          new Date(),
+        ),
+
+        180,
+      );
+
+    const updated =
+      await fixture.boardService.update(
+        fixture.appointment.id,
+
+        {
+          endDate:
+            newEndDate.toISOString().slice(0, 10),
+        },
+      );
+
+    expect(updated.endDate).toEqual(
+      newEndDate,
+    );
+  });
+
+  // TEST 5
+  it('allows shortening an existing covered board appointment', async () => {
+    const fixture =
+      await createCoveredAppointment();
+
+    const newEndDate =
+      addBoardCalendarDays(
+        getLocalBoardDate(
+          new Date(),
+        ),
+
+        30,
+      );
+
+    const updated =
+      await fixture.boardService.update(
+        fixture.appointment.id,
+
+        {
+          endDate:
+            newEndDate.toISOString().slice(0, 10),
+        },
+      );
+
+    expect(updated.endDate).toEqual(
+      newEndDate,
+    );
+  });
+
+  // TEST 6
+  it('prevents changing the historical start date of a current appointment', async () => {
+    const fixture =
+      await createCoveredAppointment();
+
+    await expect(
+      fixture.boardService.update(
+        fixture.appointment.id,
+
+        {
+          startDate:
+            addBoardCalendarDays(
+              getLocalBoardDate(
+                new Date(),
+              ),
+
+              2,
+            ).toISOString().slice(0, 10),
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code:
+          'BOARD_START_ALREADY_EFFECTIVE',
+      },
+    });
+  });
+
+  // TEST 7
+  it('preserves existing legacy indefinite appointments during position-only editing', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const appointment =
+      await prisma.boardAppointment.create({
+        data: {
+          clubId:
+            fixture.club.id,
+
+          studentId:
+            fixture.student.id,
+
+          position:
+            'Member',
+
+          startDate:
+            addBoardCalendarDays(
+              getLocalBoardDate(
+                new Date(),
+              ),
+
+              -100,
+            ),
+
+          endDate: null,
+        },
+      });
+
+    const updated =
+      await fixture.boardService.update(
+        appointment.id,
+
+        {
+          position:
+            'Secretary',
+        },
+      );
+
+    expect(updated.position).toBe(
+      'Secretary',
+    );
+
+    expect(updated.endDate).toBeNull();
+  });
+
+  // TEST 8
+  it('prevents an unpaid nominee from receiving administrator access', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    const adminService =
+      new ClubAdminAssignmentsService(
+        prisma,
+      );
+
+    await expect(
+      adminService.assignAdmin(
+        fixture.club.id,
+
+        {
+          boardAppointmentId:
+            result.nomination!.id,
+
+          position:
+            'PRESIDENT',
+        },
+
+        fixture.deanship.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+    });
+
+    expect(
+      await prisma.clubAdminAssignment.count({
+        where: {
+          clubId:
+            fixture.club.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 9
+  it('preserves paid membership when the official board appointment ends', async () => {
+    const fixture =
+      await createCoveredAppointment();
+
+    const before =
+      await prisma.membership.findFirstOrThrow({
+        where: {
+          clubId:
+            fixture.club.id,
+
+          studentId:
+            fixture.student.id,
+        },
+      });
+
+    await fixture.boardService.end(
+      fixture.appointment.id,
+
+      fixture.dto.startDate,
+
+      fixture.deanship.id,
+    );
+
+    const after =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          id: before.id,
+        },
+      });
+
+    expect(after.expiresAt).toEqual(
+      before.expiresAt,
+    );
+
+    expect(after.activatedAt).toEqual(
+      before.activatedAt,
+    );
+  });
+
+  // TEST 10
+  it('prevents duplicate termination during simultaneous board ending requests', async () => {
+    const fixture =
+      await createCoveredAppointment();
+
+    const results =
+      await Promise.allSettled([
+        fixture.boardService.end(
+          fixture.appointment.id,
+
+          fixture.dto.startDate,
+
+          fixture.deanship.id,
+        ),
+
+        fixture.boardService.end(
+          fixture.appointment.id,
+
+          fixture.dto.startDate,
+
+          fixture.deanship.id,
+        ),
+      ]);
+
+    expect(
+      results.filter(
+        result =>
+          result.status === 'fulfilled',
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      results.filter(
+        result =>
+          result.status === 'rejected',
+      ),
+    ).toHaveLength(1);
+  });
+});
 }); // Direct appointments and provisional nominations
 
 }); // Sprint 6.C - Membership applications integration

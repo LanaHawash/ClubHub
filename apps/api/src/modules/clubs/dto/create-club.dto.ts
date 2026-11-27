@@ -31,16 +31,17 @@ export class InitialBoardMemberDto {
   studentId!: string;
 
   @IsString()
-  @MinLength(1)
+  @MinLength(2)
   @MaxLength(100)
   position!: string;
 
+  @IsDefined()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   startDate!: string;
 
-  @IsOptional()
+  @IsDefined()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
-  endDate?: string;
+  endDate!: string;
 }
 
 export class InitialClubAdminDto {

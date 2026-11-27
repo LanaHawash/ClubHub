@@ -1,5 +1,8 @@
 import { Controller, Get, NotFoundException, Param, ParseUUIDPipe } from '@nestjs/common';
 import { PrismaService } from '../../shared/prisma/prisma.service';
+import {
+  getLocalBoardDate,
+} from '../../shared/membership/board-term';
 
 /** Public, display-only leadership projection; never exposes account IDs or emails. */
 @Controller('clubs')
@@ -8,7 +11,7 @@ export class PublicClubLeadershipController {
 
   @Get(':id/leadership')
   async getLeadership(@Param('id', ParseUUIDPipe) id: string) {
-    const today = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
+    const today = getLocalBoardDate(new Date());
     const club = await this.prisma.club.findFirst({
       where: { id, status: 'ACTIVE' },
       select: {

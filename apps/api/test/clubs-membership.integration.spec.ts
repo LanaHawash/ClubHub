@@ -3,6 +3,7 @@ import { Prisma } from '../src/generated/prisma/client';
 import { PrismaService } from '../src/shared/prisma/prisma.service';
 import { ClubsService } from '../src/modules/clubs/clubs.service';
 import { CreateClubDto } from '../src/modules/clubs/dto/create-club.dto';
+import { addBoardCalendarDays, getLocalBoardDate } from '../src/shared/membership/board-term';
 
 describe('Sprint 5.B - PostgreSQL Membership Integration', () => {
   let prisma: PrismaService;
@@ -136,11 +137,19 @@ it('rolls back club creation when a later operation fails', async () => {
       studentId: '00000000-0000-4000-8000-000000000001',
       position: 'President',
       startDate: '2026-11-01',
+      endDate: addBoardCalendarDays(
+        getLocalBoardDate(new Date()),
+        90,
+      ).toISOString().slice(0, 10),
     },
     {
       studentId: '00000000-0000-4000-8000-000000000001',
       position: 'Vice President',
       startDate: '2026-11-01',
+      endDate: addBoardCalendarDays(
+        getLocalBoardDate(new Date()),
+        90,
+      ).toISOString().slice(0, 10),
     },
   ];
 

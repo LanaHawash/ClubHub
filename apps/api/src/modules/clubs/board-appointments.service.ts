@@ -43,6 +43,13 @@ import {
 import {
   reconcileStudentClubApplications,
 } from '../../shared/membership/membership-lifecycle';
+import {
+  validateUpdatedBoardTerm,
+} from '../../shared/membership/board-term-update';
+
+import {
+  parseBoardDate,
+} from '../../shared/membership/board-term';
 
 @Injectable()
 export class BoardAppointmentsService {
@@ -552,81 +559,419 @@ export class BoardAppointmentsService {
     };
   });
 }
-  async update(id: string, dto: UpdateBoardAppointmentDto) {
-    return this.prisma.$transaction(async (tx) => {
-      const old = await tx.boardAppointment.findUnique({ where: { id } });
-      if (!old) throw new NotFoundException('Appointment not found.');
-      await tx.$queryRaw`
-        SELECT id FROM "Club"
-        WHERE id = ${old.clubId}::uuid
-        FOR UPDATE
-      `;
+async update(
+  id: string,
 
-      const club = await tx.club.findUnique({
-        where: { id: old.clubId },
-        select: { status: true },
+  dto: UpdateBoardAppointmentDto,
+) {
+  const initial =
+    await this.prisma.boardAppointment.findUnique({
+      where: {
+        id,
+      },
+
+      select: {
+        clubId: true,
+      },
+    });
+
+  if (!initial) {
+    throw new NotFoundException(
+      'Appointment not found.',
+    );
+  }
+
+  return this.prisma.$transaction(async tx => {
+    await lockMembershipClub(
+      tx,
+
+      initial.clubId,
+    );
+
+    /*
+     * Reread after acquiring the club lock.
+     * Never validate against a stale appointment.
+     */
+    const old =
+      await tx.boardAppointment.findUniqueOrThrow({
+        where: {
+          id,
+        },
       });
 
-      if (!club || club.status !== 'ACTIVE') {
-        throw new ConflictException(
-          'Board appointments cannot be modified for an archived club.',
-        );
-      }
+    const club =
+      await tx.club.findUnique({
+        where: {
+          id: old.clubId,
+        },
 
-      if (old.endedAt) {
-        throw new ConflictException(
-          'A manually ended appointment cannot be edited.',
-        );
-      }
-      const position = dto.position === undefined ? old.position : dto.position.trim();
-      const startDate = dto.startDate ? this.parseDay(dto.startDate) : old.startDate;
-      const endDate = dto.endDate ? this.parseDay(dto.endDate) : old.endDate;
-      if (endDate && endDate < startDate) throw new BadRequestException('End date must be on or after start date.');
-      const others = await tx.boardAppointment.findMany({ where: { clubId: old.clubId, id: { not: id } }, select: { studentId: true, position: true, startDate: true, endDate: true, endedAt: true } });
-      for (const item of others) {
-        if (item.endedAt && startDate >= this.parseDay(item.endedAt.toISOString().slice(0, 10))) continue;
-        const effectiveEnd = item.endedAt
-          ? this.parseDay(item.endedAt.toISOString().slice(0, 10))
-          : item.endDate;
-        const overlaps = item.startDate <= (endDate ?? new Date('9999-12-31T00:00:00Z')) && (!effectiveEnd || effectiveEnd >= startDate);
-        if (overlaps && (item.studentId === old.studentId || (position.toLowerCase() === 'president' && item.position.trim().toLowerCase() === 'president'))) throw new ConflictException('Overlapping board appointment or president term.');
-      }
-      const today = this.today();
-      if (startDate > today || (endDate && endDate < today)) {
-        const active = await tx.clubAdminAssignment.count({ where: { boardAppointmentId: id, revokedAt: null } });
-        if (active) throw new ConflictException('Cannot move an administrator outside their board term. End the appointment first.');
-      }
-      return tx.boardAppointment.update({ where: { id }, data: { position, startDate, endDate }, select: this.projection });
-    });
-  }
-  // End now: do not change the scheduled end date. Record the exact termination instant.
-  // The legacy dateValue argument is accepted for backwards-compatible tests/callers; it is not used.
-  async end(id: string, _dateValue: string, revokedById: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const old = await tx.boardAppointment.findUnique({ where: { id } });
-      if (!old) throw new NotFoundException('Appointment not found.');
-      await tx.$queryRaw`
-        SELECT id FROM "Club"
-        WHERE id = ${old.clubId}::uuid
-        FOR UPDATE
-      `;
-
-      const club = await tx.club.findUnique({
-        where: { id: old.clubId },
-        select: { status: true },
+        select: {
+          status: true,
+        },
       });
 
-      if (!club || club.status !== 'ACTIVE') {
+    if (!club || club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Board appointments cannot be modified for an archived club.',
+      );
+    }
+
+    if (old.endedAt) {
+      throw new ConflictException(
+        'A manually ended appointment cannot be edited.',
+      );
+    }
+
+    await lockStudentClubMembership(
+      tx,
+
+      old.clubId,
+
+      old.studentId,
+    );
+
+    const now =
+      await getMembershipTransactionTime(tx);
+
+    const today =
+      getLocalBoardDate(now);
+
+    if (
+      old.endDate &&
+      old.endDate < today
+    ) {
+      throw new ConflictException(
+        'An expired board appointment cannot be edited.',
+      );
+    }
+
+    const position =
+      dto.position === undefined
+        ? old.position
+        : dto.position.trim();
+
+    if (
+      position.length < 2 ||
+      position.length > 100
+    ) {
+      throw new BadRequestException(
+        'Invalid board position.',
+      );
+    }
+
+    const startDate =
+      dto.startDate !== undefined
+        ? parseBoardDate(dto.startDate)
+        : old.startDate;
+
+    const endDate =
+      dto.endDate !== undefined
+        ? parseBoardDate(dto.endDate)
+        : old.endDate;
+
+    const startChanged =
+      startDate.getTime() !==
+      old.startDate.getTime();
+
+    const endChanged =
+      (endDate?.getTime() ?? null) !==
+      (old.endDate?.getTime() ?? null);
+
+    const positionChanged =
+      position !== old.position;
+
+    if (
+      !startChanged &&
+      !endChanged &&
+      !positionChanged
+    ) {
+      return tx.boardAppointment.findUniqueOrThrow({
+        where: {
+          id,
+        },
+
+        select:
+          this.projection,
+      });
+    }
+
+    /*
+     * Any actual term modification must satisfy
+     * current board term rules.
+     */
+    if (startChanged || endChanged) {
+      const term =
+        validateUpdatedBoardTerm(
+          old.startDate,
+
+          startDate,
+
+          endDate,
+
+          now,
+        );
+
+      /*
+       * A shortening of an existing term does not
+       * introduce additional membership obligations.
+       *
+       * Preserve legacy appointments without forcing
+       * retroactive membership purchases.
+       */
+      const shorteningOnly =
+        !startChanged &&
+        endChanged &&
+        endDate !== null &&
+        (
+          old.endDate === null ||
+          endDate < old.endDate
+        );
+
+      if (!shorteningOnly) {
+        const period =
+          await resolveBoardCoveragePeriod(
+            tx,
+
+            term,
+
+            now,
+          );
+
+        const coverage =
+          await evaluateBoardMembershipCoverage(
+            tx,
+
+            old.clubId,
+
+            old.studentId,
+
+            period,
+          );
+
+        if (!coverage.fullyCovered) {
+          throw new ConflictException({
+            code:
+              'BOARD_MEMBERSHIP_COVERAGE_REQUIRED',
+
+            message:
+              'Paid membership must cover the complete remaining board term before it can be extended or rescheduled.',
+
+            missingIntervals:
+              coverage.missingIntervals,
+          });
+        }
+      }
+    }
+
+    /*
+     * A legacy appointment without an end date
+     * remains indefinite unless its term is edited.
+     *
+     * Use a distant comparison boundary solely
+     * for overlap detection.
+     */
+    const conflictEndDate =
+      endDate ??
+      new Date(
+        '9999-12-31T00:00:00.000Z',
+      );
+
+    await assertNoBoardAppointmentConflict(
+      tx,
+
+      {
+        clubId:
+          old.clubId,
+
+        studentId:
+          old.studentId,
+
+        position,
+
+        startDate,
+
+        endDate:
+          conflictEndDate,
+
+        now,
+
+        excludeAppointmentId:
+          id,
+      },
+    );
+
+    /*
+     * Existing administrator assignments cannot
+     * be moved outside their effective board term.
+     */
+    if (
+      startDate > today ||
+      (
+        endDate &&
+        endDate < today
+      )
+    ) {
+      const active =
+        await tx.clubAdminAssignment.count({
+          where: {
+            boardAppointmentId: id,
+
+            revokedAt: null,
+          },
+        });
+
+      if (active > 0) {
         throw new ConflictException(
-          'Board appointments cannot be ended for an archived club.',
+          'Cannot move an administrator outside their board term. End the appointment first.',
         );
       }
+    }
 
-      const now = new Date();
-      const today = this.today();
-      if (old.endedAt || old.startDate > today || (old.endDate && old.endDate < today)) throw new ConflictException('Appointment already ended or not yet active.');
-      await tx.clubAdminAssignment.updateMany({ where: { boardAppointmentId: id, revokedAt: null }, data: { revokedAt: now, revokedById } });
-      return tx.boardAppointment.update({ where: { id }, data: { endedAt: now }, select: this.projection });
+    return tx.boardAppointment.update({
+      where: {
+        id,
+      },
+
+      data: {
+        position,
+
+        startDate,
+
+        endDate,
+      },
+
+      select:
+        this.projection,
     });
+  });
+}
+ async end(
+  id: string,
+
+  _dateValue: string,
+
+  revokedById: string,
+) {
+  const initial =
+    await this.prisma.boardAppointment.findUnique({
+      where: {
+        id,
+      },
+
+      select: {
+        clubId: true,
+      },
+    });
+
+  if (!initial) {
+    throw new NotFoundException(
+      'Appointment not found.',
+    );
   }
+
+  return this.prisma.$transaction(async tx => {
+    await lockMembershipClub(
+      tx,
+
+      initial.clubId,
+    );
+
+    const old =
+      await tx.boardAppointment.findUniqueOrThrow({
+        where: {
+          id,
+        },
+      });
+
+    const club =
+      await tx.club.findUnique({
+        where: {
+          id: old.clubId,
+        },
+
+        select: {
+          status: true,
+        },
+      });
+
+    if (!club || club.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'Board appointments cannot be ended for an archived club.',
+      );
+    }
+
+    const actor =
+      await tx.account.findUnique({
+        where: {
+          id: revokedById,
+        },
+
+        select: {
+          role: true,
+
+          status: true,
+        },
+      });
+
+    if (
+      !actor ||
+      actor.role !== AccountRole.DEANSHIP ||
+      actor.status !== AccountStatus.ACTIVE
+    ) {
+      throw new ForbiddenException(
+        'Only active Deanship accounts can end board appointments.',
+      );
+    }
+
+    const now =
+      await getMembershipTransactionTime(tx);
+
+    const today =
+      getLocalBoardDate(now);
+
+    if (
+      old.endedAt ||
+      old.startDate > today ||
+      (
+        old.endDate &&
+        old.endDate < today
+      )
+    ) {
+      throw new ConflictException(
+        'Appointment already ended or not yet active.',
+      );
+    }
+
+    /*
+     * Immediately revoke administrator access
+     * associated with the terminated appointment.
+     */
+    await tx.clubAdminAssignment.updateMany({
+      where: {
+        boardAppointmentId: id,
+
+        revokedAt: null,
+      },
+
+      data: {
+        revokedAt: now,
+
+        revokedById,
+      },
+    });
+
+    return tx.boardAppointment.update({
+      where: {
+        id,
+      },
+
+      data: {
+        endedAt: now,
+      },
+
+      select:
+        this.projection,
+    });
+  });
+}
 }

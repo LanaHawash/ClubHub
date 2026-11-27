@@ -53,6 +53,17 @@ import {
 import {
   MembershipLifecycleService,
 } from '../src/modules/membership-applications/membership-lifecycle.service';
+
+import {
+  validateNewBoardTerm,
+  resolveBoardCoveragePeriod,
+  parseBoardDate,
+} from '../src/shared/membership/board-term';
+
+import {
+  evaluateBoardMembershipCoverage,
+} from '../src/shared/membership/board-membership-coverage';
+
 describe('Sprint 6.C - Membership applications integration', () => {
   let prisma: PrismaService;
   let clubsService: ClubsService;
@@ -5342,6 +5353,438 @@ describe('Sprint 6.F - Automatic reconciliation and delayed callbacks', () => {
     expect(quote.feeType).toBe('RENEWAL');
 
     expect(quote.alreadyActiveMember).toBe(false);
+  });
+});
+describe('Sprint 6.G - Board membership coverage', () => {
+  const referenceNow = new Date(
+    '2026-11-27T10:00:00.000Z',
+  );
+
+  const requiredPeriod = {
+    startAt: new Date(
+      '2026-12-01T00:00:00.000Z',
+    ),
+
+    endAt: new Date(
+      '2027-06-01T00:00:00.000Z',
+    ),
+  };
+
+  async function evaluateCoverage(
+    clubId: string,
+    studentId: string,
+  ) {
+    return prisma.$transaction(
+      async tx =>
+        evaluateBoardMembershipCoverage(
+          tx,
+
+          clubId,
+
+          studentId,
+
+          requiredPeriod,
+        ),
+    );
+  }
+
+  // TEST 1
+  it('requires nomination when the candidate has no membership', async () => {
+    const club = await createClub();
+
+    const { student } =
+      await createStudent();
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.decision).toBe(
+      'NOMINATION_REQUIRED',
+    );
+
+    expect(result.reason).toBe(
+      'NO_MEMBERSHIP',
+    );
+
+    expect(result.fullyCovered).toBe(false);
+
+    expect(
+      result.hasMembershipHistory,
+    ).toBe(false);
+  });
+
+  // TEST 2
+  it('permits direct appointment when the entire term is covered', async () => {
+    const club = await createClub();
+
+    const { student } =
+      await createStudent();
+
+    await prisma.membership.create({
+      data: {
+        clubId: club.id,
+
+        studentId: student.id,
+
+        activatedAt: new Date(
+          '2026-10-01T00:00:00.000Z',
+        ),
+
+        expiresAt: new Date(
+          '2027-10-01T00:00:00.000Z',
+        ),
+      },
+    });
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.decision).toBe(
+      'DIRECT_APPOINTMENT',
+    );
+
+    expect(result.fullyCovered).toBe(true);
+
+    expect(result.reason).toBeNull();
+
+    expect(result.missingIntervals).toEqual([]);
+  });
+
+  // TEST 3
+  it('requires nomination when membership expires during the board term', async () => {
+    const club = await createClub();
+
+    const { student } =
+      await createStudent();
+
+    const expiresAt = new Date(
+      '2027-02-01T00:00:00.000Z',
+    );
+
+    await prisma.membership.create({
+      data: {
+        clubId: club.id,
+
+        studentId: student.id,
+
+        activatedAt: new Date(
+          '2026-02-01T00:00:00.000Z',
+        ),
+
+        expiresAt,
+      },
+    });
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.decision).toBe(
+      'NOMINATION_REQUIRED',
+    );
+
+    expect(result.reason).toBe(
+      'INSUFFICIENT_COVERAGE',
+    );
+
+    expect(result.missingIntervals).toEqual([
+      {
+        startAt: expiresAt,
+
+        endAt: requiredPeriod.endAt,
+      },
+    ]);
+  });
+
+  // TEST 4
+  it('recognizes expired membership history without treating it as coverage', async () => {
+    const club = await createClub();
+
+    const { student } =
+      await createStudent();
+
+    await prisma.membership.create({
+      data: {
+        clubId: club.id,
+
+        studentId: student.id,
+
+        activatedAt: new Date(
+          '2025-01-01T00:00:00.000Z',
+        ),
+
+        expiresAt: new Date(
+          '2026-01-01T00:00:00.000Z',
+        ),
+      },
+    });
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.fullyCovered).toBe(false);
+
+    expect(
+      result.hasMembershipHistory,
+    ).toBe(true);
+
+    expect(result.reason).toBe(
+      'NO_MEMBERSHIP',
+    );
+  });
+
+  // TEST 5
+  it('accepts continuous adjacent membership intervals', async () => {
+    const club = await createClub();
+
+    const { student } =
+      await createStudent();
+
+    const boundary = new Date(
+      '2027-02-01T00:00:00.000Z',
+    );
+
+    await prisma.membership.createMany({
+      data: [
+        {
+          clubId: club.id,
+
+          studentId: student.id,
+
+          activatedAt: new Date(
+            '2026-02-01T00:00:00.000Z',
+          ),
+
+          expiresAt: boundary,
+        },
+
+        {
+          clubId: club.id,
+
+          studentId: student.id,
+
+          activatedAt: boundary,
+
+          expiresAt: new Date(
+            '2028-02-01T00:00:00.000Z',
+          ),
+        },
+      ],
+    });
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.fullyCovered).toBe(true);
+
+    expect(result.membershipIds).toHaveLength(2);
+
+    expect(result.decision).toBe(
+      'DIRECT_APPOINTMENT',
+    );
+  });
+
+  // TEST 6
+  it('detects gaps between membership intervals', async () => {
+    const club = await createClub();
+
+    const { student } =
+      await createStudent();
+
+    const gapStart = new Date(
+      '2027-02-01T00:00:00.000Z',
+    );
+
+    const gapEnd = new Date(
+      '2027-02-02T00:00:00.000Z',
+    );
+
+    await prisma.membership.createMany({
+      data: [
+        {
+          clubId: club.id,
+
+          studentId: student.id,
+
+          activatedAt: new Date(
+            '2026-02-01T00:00:00.000Z',
+          ),
+
+          expiresAt: gapStart,
+        },
+
+        {
+          clubId: club.id,
+
+          studentId: student.id,
+
+          activatedAt: gapEnd,
+
+          expiresAt: new Date(
+            '2028-02-02T00:00:00.000Z',
+          ),
+        },
+      ],
+    });
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.fullyCovered).toBe(false);
+
+    expect(result.missingIntervals).toEqual([
+      {
+        startAt: gapStart,
+
+        endAt: gapEnd,
+      },
+    ]);
+  });
+
+  // TEST 7
+  it('does not use membership belonging to another club', async () => {
+    const club = await createClub();
+
+    const otherClub =
+      await createClub();
+
+    const { student } =
+      await createStudent();
+
+    await prisma.membership.create({
+      data: {
+        clubId: otherClub.id,
+
+        studentId: student.id,
+
+        activatedAt: new Date(
+          '2026-10-01T00:00:00.000Z',
+        ),
+
+        expiresAt: new Date(
+          '2027-10-01T00:00:00.000Z',
+        ),
+      },
+    });
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.fullyCovered).toBe(false);
+
+    expect(
+      result.hasMembershipHistory,
+    ).toBe(false);
+  });
+
+  // TEST 8
+  it('does not treat an awaiting-cash application as paid coverage', async () => {
+    const {
+      club,
+      student,
+    } = await createAwaitingCashApplication();
+
+    const result =
+      await evaluateCoverage(
+        club.id,
+        student.id,
+      );
+
+    expect(result.fullyCovered).toBe(false);
+
+    expect(result.reason).toBe(
+      'NO_MEMBERSHIP',
+    );
+  });
+
+  // TEST 9
+  it('uses the exact current instant for appointments starting today', async () => {
+    const term =
+      validateNewBoardTerm(
+        '2026-11-27',
+
+        '2026-11-28',
+
+        referenceNow,
+      );
+
+    const period =
+      await prisma.$transaction(
+        async tx =>
+          resolveBoardCoveragePeriod(
+            tx,
+            term,
+            referenceNow,
+          ),
+      );
+
+    expect(period.startAt).toEqual(
+      referenceNow,
+    );
+
+    expect(period.endAt).toEqual(
+      new Date(
+        '2026-11-28T22:00:00.000Z',
+      ),
+    );
+  });
+
+  // TEST 10
+  it('converts future board dates to Palestine local midnight boundaries', async () => {
+    const term =
+      validateNewBoardTerm(
+        '2026-12-01',
+
+        '2026-12-02',
+
+        referenceNow,
+      );
+
+    const period =
+      await prisma.$transaction(
+        async tx =>
+          resolveBoardCoveragePeriod(
+            tx,
+            term,
+            referenceNow,
+          ),
+      );
+
+    expect(term.startDate).toEqual(
+      parseBoardDate('2026-12-01'),
+    );
+
+    expect(period.startAt).toEqual(
+      new Date(
+        '2026-11-30T22:00:00.000Z',
+      ),
+    );
+
+    expect(period.endAt).toEqual(
+      new Date(
+        '2026-12-02T22:00:00.000Z',
+      ),
+    );
   });
 });
 });

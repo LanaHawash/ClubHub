@@ -1,11 +1,11 @@
 import {
   Controller,
+  Get,
   Param,
   ParseUUIDPipe,
   Post,
   Req,
   UseGuards,
-  Get,
 } from '@nestjs/common';
 
 import {
@@ -33,18 +33,29 @@ import {
 } from './payments.service';
 
 @Controller()
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(AccountRole.STUDENT)
 export class PaymentsController {
   constructor(
     private readonly paymentsService:
       PaymentsService,
   ) {}
 
-  @Post(
-    'membership-applications/:id/payments/cash',
-  )
+  @Post('membership-applications/:id/payments/cash')
+  selectCashPayment(
+    @Param('id', ParseUUIDPipe)
+    applicationId: string,
+
+    @Req()
+    request: AuthenticatedRequest,
+  ) {
+    return this.paymentsService.selectCashPayment(
+      request.user.id,
+      applicationId,
+    );
+  }
+
   @Get('clubs/:clubId/admin/payments/cash')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(AccountRole.STUDENT)
   getPendingCashPayments(
     @Param('clubId', ParseUUIDPipe)
     clubId: string,
@@ -58,42 +69,23 @@ export class PaymentsController {
     );
   }
 
-@Post(
-  'clubs/:clubId/admin/payments/:paymentId/confirm-cash',
-)
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(AccountRole.STUDENT)
-confirmCashPayment(
-  @Param('clubId', ParseUUIDPipe)
-  clubId: string,
-
-  @Param('paymentId', ParseUUIDPipe)
-  paymentId: string,
-
-  @Req()
-  request: AuthenticatedRequest,
-) {
-  return this.paymentsService.confirmCashPayment(
-    request.user.id,
-    clubId,
-    paymentId,
-  );
-}
-  @UseGuards(
-    JwtAuthGuard,
-    RolesGuard,
+  @Post(
+    'clubs/:clubId/admin/payments/:paymentId/confirm-cash',
   )
-  @Roles(AccountRole.STUDENT)
-  selectCashPayment(
-    @Param('id', ParseUUIDPipe)
-    applicationId: string,
+  confirmCashPayment(
+    @Param('clubId', ParseUUIDPipe)
+    clubId: string,
+
+    @Param('paymentId', ParseUUIDPipe)
+    paymentId: string,
 
     @Req()
     request: AuthenticatedRequest,
   ) {
-    return this.paymentsService.selectCashPayment(
+    return this.paymentsService.confirmCashPayment(
       request.user.id,
-      applicationId,
+      clubId,
+      paymentId,
     );
   }
 }

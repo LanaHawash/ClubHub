@@ -34,6 +34,9 @@ import {
 import {
   reconcileApplicationById,
 } from '../../shared/membership/membership-lifecycle';
+import {
+  assertBoardNominationPayable,
+} from '../../shared/membership/board-nomination-payable';
 
 @Injectable()
 export class PaymentsService {
@@ -192,11 +195,19 @@ export class PaymentsService {
       const now =
         await getMembershipTransactionTime(tx);
 
-      await assertOrdinaryApplicationPayable(
-        tx,
-        application,
-        now,
-      );
+      if (application.kind === 'BOARD_ONBOARDING') {
+  await assertBoardNominationPayable(
+    tx,
+    application,
+    now,
+  );
+} else {
+  await assertOrdinaryApplicationPayable(
+    tx,
+    application,
+    now,
+  );
+}
 
       /*
        * Repeating the same cash selection must not

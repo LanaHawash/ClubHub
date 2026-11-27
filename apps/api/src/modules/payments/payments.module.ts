@@ -48,6 +48,18 @@ import {
   PaymentSimulationService,
 } from './payment-simulation.service';
 
+import {
+  BoardPaymentsController,
+} from './board-payments.controller';
+
+import {
+  BoardPaymentsService,
+} from './board-payments.service';
+
+import {
+  BoardPaymentConfirmationService,
+} from './board-payment-confirmation.service';
+
 @Module({
   imports: [
     AuthModule,
@@ -56,32 +68,39 @@ import {
   ],
 
   controllers: [
-    PaymentsController,
-    OnlinePaymentsController,
-    PaymentProviderEventsController,
-    PaymentSimulationController,
-  ],
+  PaymentsController,
+  OnlinePaymentsController,
+  PaymentProviderEventsController,
+  PaymentSimulationController,
+  BoardPaymentsController,
+],
 
   providers: [
-    PaymentsService,
-    PaymentConfirmationService,
-    OnlinePaymentsService,
-    SimulatedPaymentProvider,
-    PaymentProviderEventsService,
-    PaymentSimulationService,
+  PaymentsService,
+  PaymentConfirmationService,
+  OnlinePaymentsService,
+  SimulatedPaymentProvider,
+  PaymentProviderEventsService,
+  PaymentSimulationService,
 
-    {
-      provide: ONLINE_PAYMENT_PROVIDER,
+  BoardPaymentsService,
+  BoardPaymentConfirmationService,
 
-      useExisting: SimulatedPaymentProvider,
-    },
-  ],
+  {
+    provide: ONLINE_PAYMENT_PROVIDER,
+
+    useExisting: SimulatedPaymentProvider,
+  },
+],
 
   exports: [
-    PaymentsService,
-    PaymentConfirmationService,
-    OnlinePaymentsService,
-    PaymentProviderEventsService,
-  ],
+  PaymentsService,
+  PaymentConfirmationService,
+  OnlinePaymentsService,
+  PaymentProviderEventsService,
+
+  BoardPaymentsService,
+  BoardPaymentConfirmationService,
+],
 })
 export class PaymentsModule {}

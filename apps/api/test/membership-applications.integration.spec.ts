@@ -1,6 +1,7 @@
 import {
   ConflictException,
   ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 
 import { randomUUID } from 'node:crypto';
@@ -71,6 +72,13 @@ import {
   getLocalBoardDate,
   addBoardCalendarDays,
 } from '../src/shared/membership/board-term';
+import {
+  BoardPaymentsService,
+} from '../src/modules/payments/board-payments.service';
+
+import {
+  BoardPaymentConfirmationService,
+} from '../src/modules/payments/board-payment-confirmation.service';
 
 describe('Sprint 6.C - Membership applications integration', () => {
   let prisma: PrismaService;
@@ -6467,5 +6475,735 @@ describe('Sprint 6.G - Direct appointments and provisional nominations', () => {
       }),
     ).toBe(1);
   });
+  
+describe('Nomination cash payments', () => {
+  function createBoardPaymentsService() {
+    return new BoardPaymentsService(
+      prisma,
+
+      new ClubEligibilityService(prisma),
+
+      new BoardPaymentConfirmationService(),
+    );
+  }
+
+  async function createAwaitingNominationCashPayment(
+    registrationMode:
+      | 'ALWAYS_OPEN'
+      | 'WINDOWED' = 'ALWAYS_OPEN',
+  ) {
+    const fixture =
+      await createBoardFixture(
+        registrationMode,
+      );
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    if (result.outcome !== 'NOMINATION_CREATED') {
+      throw new Error(
+        'Expected a provisional nomination.',
+      );
+    }
+
+    const cash =
+      await paymentsService.selectCashPayment(
+        fixture.account.id,
+        result.application.id,
+      );
+
+    return {
+      ...fixture,
+
+      nomination: result.nomination,
+
+      application: result.application,
+
+      payment: cash.payment,
+
+      boardPaymentsService:
+        createBoardPaymentsService(),
+    };
+  }
+
+  // TEST 1
+  it('allows a nominated student to select cash payment', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    expect(fixture.payment.method).toBe(
+      'IN_PERSON',
+    );
+
+    expect(fixture.payment.provider).toBe(
+      'MANUAL',
+    );
+
+    expect(fixture.payment.status).toBe(
+      'AWAITING_CASH',
+    );
+
+    expect(fixture.payment.amount).toBe(
+      '30.00',
+    );
+
+    expect(
+      fixture.payment.membershipApplicationId,
+    ).toBe(fixture.application.id);
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 2
+  it('allows nomination cash selection while ordinary registration is closed', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment(
+        'WINDOWED',
+      );
+
+    expect(fixture.payment.status).toBe(
+      'AWAITING_CASH',
+    );
+
+    expect(
+      fixture.application.registrationWindowId,
+    ).toBeNull();
+  });
+
+  // TEST 3
+  it('returns the same payment when nomination cash selection is repeated', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const repeated =
+      await paymentsService.selectCashPayment(
+        fixture.account.id,
+        fixture.application.id,
+      );
+
+    expect(repeated.payment.id).toBe(
+      fixture.payment.id,
+    );
+
+    expect(
+      await prisma.payment.count({
+        where: {
+          membershipApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 4
+  it('prevents another student from selecting cash for a nominee', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const otherStudent =
+      await createStudent();
+
+    await expect(
+      paymentsService.selectCashPayment(
+        otherStudent.account.id,
+        fixture.application.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  // TEST 5
+  it('atomically confirms nomination cash payment and qualifies the nominee', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const result =
+      await fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      );
+
+    expect(result.payment.status).toBe(
+      'CONFIRMED',
+    );
+
+    expect(result.application.status).toBe(
+      'PAID',
+    );
+
+    expect(result.nomination.status).toBe(
+      'QUALIFIED',
+    );
+
+    expect(
+      result.nomination.boardAppointmentId,
+    ).toBe(result.appointment.id);
+
+    expect(result.membership.studentId).toBe(
+      fixture.student.id,
+    );
+
+    expect(
+      result.membership.sourceApplicationId,
+    ).toBe(fixture.application.id);
+
+    expect(
+      result.membership.sourcePaymentId,
+    ).toBe(fixture.payment.id);
+
+    expect(
+      result.payment.confirmedByAccountId,
+    ).toBe(fixture.deanship.id);
+
+    expect(
+      result.nomination.qualifiedAt,
+    ).toEqual(result.payment.confirmedAt);
+
+    expect(
+      result.membership.activatedAt,
+    ).toEqual(result.payment.confirmedAt);
+
+    expect(
+      result.membership.membershipNumber,
+    ).toMatch(/^CH-\d{4}-\d+$/);
+  });
+
+  // TEST 6
+  it('qualifies a paid nominee even when ordinary registration is closed', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment(
+        'WINDOWED',
+      );
+
+    const result =
+      await fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      );
+
+    expect(result.nomination.status).toBe(
+      'QUALIFIED',
+    );
+
+    expect(result.payment.status).toBe(
+      'CONFIRMED',
+    );
+
+    const availability =
+      await clubsService.getMembershipAvailability(
+        fixture.club.id,
+      );
+
+    expect(
+      availability.registrationAvailable,
+    ).toBe(false);
+  });
+
+  // TEST 7
+  it('makes nomination cash confirmation idempotent', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const first =
+      await fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      );
+
+    const second =
+      await fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      );
+
+    expect(first.alreadyConfirmed).toBe(false);
+
+    expect(second.alreadyConfirmed).toBe(true);
+
+    expect(second.membership.id).toBe(
+      first.membership.id,
+    );
+
+    expect(second.appointment.id).toBe(
+      first.appointment.id,
+    );
+
+    expect(second.nomination.qualifiedAt).toEqual(
+      first.nomination.qualifiedAt,
+    );
+  });
+
+  // TEST 8
+  it('preserves the original Deanship confirmer', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const anotherDeanship =
+      await prisma.account.create({
+        data: {
+          email:
+            `second-nomination-deanship-${uniqueSuffix()}@example.com`,
+
+          passwordHash:
+            'integration-test-only',
+
+          role: 'DEANSHIP',
+
+          status: 'ACTIVE',
+        },
+      });
+
+    await fixture.boardPaymentsService.confirmCashPayment(
+      fixture.deanship.id,
+      fixture.club.id,
+      fixture.payment.id,
+    );
+
+    const repeated =
+      await fixture.boardPaymentsService.confirmCashPayment(
+        anotherDeanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      );
+
+    expect(
+      repeated.payment.confirmedByAccountId,
+    ).toBe(fixture.deanship.id);
+  });
+
+  // TEST 9
+  it('prevents simultaneous confirmations from creating duplicate memberships or board appointments', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const results = await Promise.all([
+      fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+
+      fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ]);
+
+    expect(results[0].membership.id).toBe(
+      results[1].membership.id,
+    );
+
+    expect(results[0].appointment.id).toBe(
+      results[1].appointment.id,
+    );
+
+    expect(
+      results.filter(
+        result => !result.alreadyConfirmed,
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(1);
+
+    expect(
+      await prisma.boardAppointment.count({
+        where: {
+          clubId: fixture.club.id,
+
+          studentId: fixture.student.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 10
+  it('prevents an ordinary student from confirming a nomination cash payment', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    await expect(
+      fixture.boardPaymentsService.confirmCashPayment(
+        fixture.account.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  // TEST 11
+  it('prevents a club administrator from confirming nomination payments', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const administrator =
+      await createClubAdministrator(
+        fixture.club.id,
+      );
+
+    await expect(
+      fixture.boardPaymentsService.confirmCashPayment(
+        administrator.account.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  // TEST 12
+  it('rejects nomination payments through the ordinary club administrator endpoint logic', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const administrator =
+      await createClubAdministrator(
+        fixture.club.id,
+      );
+
+    await expect(
+      paymentsService.confirmCashPayment(
+        administrator.account.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  // TEST 13
+  it('rejects ordinary membership payments through the Deanship nomination payment service', async () => {
+    const ordinary =
+      await createAwaitingCashApplication();
+
+    const fixture =
+      await createBoardFixture();
+
+    await expect(
+      createBoardPaymentsService().confirmCashPayment(
+        fixture.deanship.id,
+        ordinary.club.id,
+        ordinary.payment.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  // TEST 14
+  it('rejects nomination cash confirmation after the nomination deadline', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const deadline = new Date(
+      Date.now() - MINUTE_MS,
+    );
+
+    const nominatedAt = new Date(
+      deadline.getTime() -
+        72 * 60 * MINUTE_MS,
+    );
+
+    await prisma.$transaction([
+      prisma.boardNomination.update({
+        where: {
+          id: fixture.nomination.id,
+        },
+
+        data: {
+          nominatedAt,
+
+          deadlineAt: deadline,
+        },
+      }),
+
+      prisma.membershipApplication.update({
+        where: {
+          id: fixture.application.id,
+        },
+
+        data: {
+          submittedAt: nominatedAt,
+
+          paymentDeadlineAt: deadline,
+
+          originalDeadlineAt: deadline,
+        },
+      }),
+    ]);
+
+    await expect(
+      fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 15
+  it('rejects cash confirmation for an archived club', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    await clubsService.archive(
+      fixture.club.id,
+    );
+
+    await expect(
+      fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 16
+  it('rejects nomination confirmation when the payment amount differs from the frozen quote', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    await prisma.payment.update({
+      where: {
+        id: fixture.payment.id,
+      },
+
+      data: {
+        amount: '99.00',
+      },
+    });
+
+    await expect(
+      fixture.boardPaymentsService.confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        fixture.payment.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code: 'PAYMENT_AMOUNT_MISMATCH',
+      },
+    });
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 17
+  it('creates prepaid renewal beginning at the existing membership expiration', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    const existingExpiry =
+      new Date(
+        Date.now() + 30 * DAY_MS,
+      );
+
+    const previousMembership =
+      await prisma.membership.create({
+        data: {
+          clubId: fixture.club.id,
+
+          studentId: fixture.student.id,
+
+          activatedAt: new Date(
+            Date.now() - 335 * DAY_MS,
+          ),
+
+          expiresAt: existingExpiry,
+        },
+      });
+
+    const nomination =
+      await fixture.boardService.create(
+        fixture.club.id,
+        fixture.dto,
+        fixture.deanship.id,
+      );
+
+    if (nomination.outcome !== 'NOMINATION_CREATED') {
+      throw new Error(
+        'Expected a prepaid renewal nomination.',
+      );
+    }
+
+    const cash =
+      await paymentsService.selectCashPayment(
+        fixture.account.id,
+        nomination.application.id,
+      );
+
+    expect(cash.payment.amount).toBe(
+      '20.00',
+    );
+
+    const result =
+      await createBoardPaymentsService().confirmCashPayment(
+        fixture.deanship.id,
+        fixture.club.id,
+        cash.payment.id,
+      );
+
+    expect(result.membership.activatedAt).toEqual(
+      existingExpiry,
+    );
+
+    expect(result.membership.id).not.toBe(
+      previousMembership.id,
+    );
+
+    expect(
+      result.membership.confirmedPaymentAt!.getTime(),
+    ).toBeLessThan(
+      result.membership.activatedAt.getTime(),
+    );
+
+    expect(result.nomination.status).toBe(
+      'QUALIFIED',
+    );
+
+    const unchangedPreviousMembership =
+      await prisma.membership.findUniqueOrThrow({
+        where: {
+          id: previousMembership.id,
+        },
+      });
+
+    expect(
+      unchangedPreviousMembership.expiresAt,
+    ).toEqual(existingExpiry);
+  });
+
+  // TEST 18
+  it('does not automatically assign administrator privileges after qualification', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    await fixture.boardPaymentsService.confirmCashPayment(
+      fixture.deanship.id,
+      fixture.club.id,
+      fixture.payment.id,
+    );
+
+    expect(
+      await prisma.clubAdminAssignment.count({
+        where: {
+          clubId: fixture.club.id,
+
+          accountId: fixture.account.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 19
+  it('lists only pending nomination cash payments for the requested club', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    const otherFixture =
+      await createAwaitingNominationCashPayment();
+
+    const result =
+      await fixture.boardPaymentsService.getPendingCashPayments(
+        fixture.deanship.id,
+        fixture.club.id,
+      );
+
+    expect(result.total).toBe(1);
+
+    expect(result.payments[0].paymentId).toBe(
+      fixture.payment.id,
+    );
+
+    expect(result.payments[0].paymentId).not.toBe(
+      otherFixture.payment.id,
+    );
+
+    expect(result.payments[0].nominationId).toBe(
+      fixture.nomination.id,
+    );
+  });
+
+  // TEST 20
+  it('removes qualified nomination payments from the pending Deanship cash list', async () => {
+    const fixture =
+      await createAwaitingNominationCashPayment();
+
+    await fixture.boardPaymentsService.confirmCashPayment(
+      fixture.deanship.id,
+      fixture.club.id,
+      fixture.payment.id,
+    );
+
+    const result =
+      await fixture.boardPaymentsService.getPendingCashPayments(
+        fixture.deanship.id,
+        fixture.club.id,
+      );
+
+    expect(result.total).toBe(0);
+
+    expect(result.payments).toEqual([]);
+  });
+});
 });
 });

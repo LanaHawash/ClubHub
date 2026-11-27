@@ -628,17 +628,20 @@ it('returns the latest effective fees for an always-open club', async () => {
   });
 
   expect(
-    prismaMock.clubMembershipFeeVersion.findFirst,
-  ).toHaveBeenCalledWith(
-    expect.objectContaining({
-      where: {
-        clubId,
-        effectiveAt: {
-          lte: expect.any(Date),
-        },
+  prismaMock.clubMembershipFeeVersion.findFirst,
+).toHaveBeenCalledWith(
+  expect.objectContaining({
+    where: {
+      clubId,
+
+      purpose: 'STANDARD',
+
+      effectiveAt: {
+        lte: expect.any(Date),
       },
-    }),
-  );
+    },
+  }),
+);
 });
 it('returns the locked effective fees for an active window', async () => {
   const now = Date.now();

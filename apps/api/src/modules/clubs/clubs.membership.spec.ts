@@ -12,23 +12,25 @@ describe('ClubsService - Sprint 5 Membership Creation', () => {
   };
 
   const txMock = {
+  $queryRaw: jest.fn<() => Promise<{ now: Date }[]>>(),
 
-    club: {
-      create: jest.fn(),
-    },
+  club: {
+    create: jest.fn(),
+  },
 
-    clubMembershipSettings: {
-      create: jest.fn(),
-    },
+  clubMembershipSettings: {
+    create: jest.fn(),
+  },
 
-    clubMembershipFeeVersion: {
-      create: jest.fn(),
-    },
+  clubMembershipFeeVersion: {
+    create: jest.fn(),
+  },
 
-    clubRegistrationWindow: {
-      create: jest.fn(),
-    },
-  };
+  clubRegistrationWindow: {
+    create: jest.fn(),
+  },
+};
+ 
 
   type TransactionCallback = (
     tx: typeof txMock,
@@ -84,7 +86,11 @@ describe('ClubsService - Sprint 5 Membership Creation', () => {
     prismaMock.$transaction.mockImplementation(
       async (callback) => callback(txMock),
     );
-
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        now: new Date(),
+      },
+    ]);
     txMock.club.create.mockResolvedValue(
       createdClub as never,
     );
@@ -292,6 +298,9 @@ describe('ClubsService - Sprint 5.C Membership Management', () => {
 
   const txMock = {
      $queryRaw: jest.fn(),
+     membershipApplication: {
+      findMany: jest.fn(),
+    },
 
     club: {
       findUnique: jest.fn(),
@@ -371,13 +380,60 @@ describe('ClubsService - Sprint 5.C Membership Management', () => {
     txMock.clubMembershipFeeVersion.create.mockResolvedValue(
       {} as never,
     );
-    txMock.$queryRaw
-  .mockResolvedValueOnce(
-    [{ id: 'locked-settings' }] as never,
-  )
-  .mockResolvedValueOnce(
-    [{ now: new Date() }] as never,
-  );
+    txMock.$queryRaw.mockReset();
+
+txMock.$queryRaw.mockImplementation(
+  async (...args: unknown[]) => {
+    const strings =
+      args[0] as TemplateStringsArray;
+
+    const sql = strings.join(' ');
+
+    if (sql.includes('clock_timestamp()')) {
+      return [
+        {
+          now: new Date(),
+        },
+      ];
+    }
+
+    if (
+      sql.includes('"ClubRegistrationWindow"')
+    ) {
+      return [
+        {
+          id: windowId,
+        },
+      ];
+    }
+
+    if (
+      sql.includes('"ClubMembershipSettings"')
+    ) {
+      return [
+        {
+          id: 'locked-settings',
+        },
+      ];
+    }
+
+    if (sql.includes('"Club"')) {
+      return [
+        {
+          id: clubId,
+        },
+      ];
+    }
+
+    throw new Error(
+      `Unexpected raw SQL in membership management test: ${sql}`,
+    );
+  },
+);
+
+txMock.membershipApplication.findMany.mockResolvedValue(
+  [] as never,
+);
   });
 
   describe('Early registration closure', () => {

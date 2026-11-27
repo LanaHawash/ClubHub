@@ -129,42 +129,96 @@ describe('Sprint 5.B - PostgreSQL Membership Integration', () => {
 it('rolls back club creation when a later operation fails', async () => {
   const dto = makeDto('rollback');
 
-  // Deliberately provide duplicate board members.
-  // The service detects this after creating the club
-  // and membership records inside the transaction.
+  const deanship =
+    await prisma.account.create({
+      data: {
+        email:
+          `rollback-deanship-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`,
+
+        passwordHash:
+          'integration-test-only',
+
+        role: 'DEANSHIP',
+
+        status: 'ACTIVE',
+      },
+    });
+
+  const today =
+    getLocalBoardDate(
+      new Date(),
+    );
+
+  const startDate =
+    today.toISOString().slice(0, 10);
+
+  const endDate =
+    addBoardCalendarDays(
+      today,
+
+      90,
+    ).toISOString().slice(0, 10);
+
+  /*
+   * Provide valid nomination dates and a valid
+   * Deanship actor, but a nonexistent candidate.
+   *
+   * Candidate validation occurs after creating
+   * the club and membership settings inside
+   * the transaction.
+   */
   dto.boardMembers = [
     {
-      studentId: '00000000-0000-4000-8000-000000000001',
+      studentId:
+        '00000000-0000-4000-8000-000000000001',
+
       position: 'President',
-      startDate: '2026-11-01',
-      endDate: addBoardCalendarDays(
-        getLocalBoardDate(new Date()),
-        90,
-      ).toISOString().slice(0, 10),
-    },
-    {
-      studentId: '00000000-0000-4000-8000-000000000001',
-      position: 'Vice President',
-      startDate: '2026-11-01',
-      endDate: addBoardCalendarDays(
-        getLocalBoardDate(new Date()),
-        90,
-      ).toISOString().slice(0, 10),
+
+      startDate,
+
+      endDate,
     },
   ];
 
-  await expect(
-    clubsService.create(dto),
-  ).rejects.toThrow(BadRequestException);
+  /*
+   * Verify that the test fixture really refers
+   * to a nonexistent student.
+   */
+  const nonexistentStudent =
+    await prisma.universityStudent.findUnique({
+      where: {
+        id: dto.boardMembers[0].studentId,
+      },
+    });
 
-  // PostgreSQL must roll back the club record.
-  const club = await prisma.club.findFirst({
-    where: { name: dto.name },
+  expect(nonexistentStudent).toBeNull();
+
+  await expect(
+    clubsService.create(
+      dto,
+
+      deanship.id,
+    ),
+  ).rejects.toMatchObject({
+    status: 400,
+
+    message:
+      'Every board candidate must have an active ClubHub student account.',
   });
+
+  /*
+   * The club must not survive the transaction
+   * after candidate validation fails.
+   */
+  const club =
+    await prisma.club.findFirst({
+      where: {
+        name: dto.name,
+      },
+    });
 
   expect(club).toBeNull();
 });
-
   it('rejects invalid fees without persisting a club', async () => {
     const dto = makeDto('invalid-fee');
     dto.membership.firstTimeFee = '-5.00';

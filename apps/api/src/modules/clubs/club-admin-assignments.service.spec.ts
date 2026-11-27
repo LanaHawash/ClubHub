@@ -23,7 +23,11 @@ describe('ClubAdminAssignmentsService', () => {
 
   const prisma = {
     club: { findUnique: jest.fn() },
-    account: { findUnique: jest.fn() },
+    account: {
+  findUnique: jest.fn(),
+
+  findUniqueOrThrow: jest.fn(),
+},
     boardAppointment: { findUnique: jest.fn() },
     clubAdminAssignment: {
       create: jest.fn(),
@@ -83,7 +87,15 @@ describe('ClubAdminAssignmentsService', () => {
         return null;
       },
     );
+    prisma.account.findUniqueOrThrow.mockResolvedValue({
+  id: studentAccountId,
 
+  role: AccountRole.STUDENT,
+
+  status: AccountStatus.ACTIVE,
+
+  universityStudentId,
+});
     prisma.clubAdminAssignment.create.mockResolvedValue({
       id: assignmentId,
       clubId,

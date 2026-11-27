@@ -11,19 +11,34 @@ describe('ClubsService - Sprint 3.2', () => {
   let service: ClubsService;
 
   const prismaMock = {
-  club: {
-    findMany: jest.fn(),
-    findFirst: jest.fn(),
-    findUnique: jest.fn(),
-    updateMany: jest.fn(),
-    update: jest.fn(),
-    count: jest.fn(),
-  },
-  supervisorProfile: {
-    findUnique: jest.fn(),
-  },
-  $transaction: jest.fn(),
-};
+    club: {
+      findMany: jest.fn(),
+
+      findFirst: jest.fn(),
+
+      findUnique: jest.fn(),
+
+      updateMany: jest.fn(),
+
+      update: jest.fn(),
+
+      count: jest.fn(),
+    },
+
+    supervisorProfile: {
+      findUnique: jest.fn(),
+    },
+
+    membershipApplication: {
+      findMany: jest.fn(),
+
+      updateMany: jest.fn(),
+    },
+
+    $queryRaw: jest.fn(),
+
+    $transaction: jest.fn(),
+  };
   const clubs = [
     {
       id: 'club-1',
@@ -44,13 +59,75 @@ describe('ClubsService - Sprint 3.2', () => {
       prismaMock as unknown as PrismaService,
     );
 
-    // Simulate Prisma's transaction response.
-    prismaMock.$transaction.mockImplementation(
-      async (...args: unknown[]) => {
-        const operations = args[0] as Promise<unknown>[];
-        return Promise.all(operations);
-      },
+    /*
+ * Support both Prisma transaction forms:
+ *
+ * 1. Batch transactions.
+ * 2. Interactive transactions.
+ */
+prismaMock.$transaction.mockImplementation(
+  async (...args: unknown[]) => {
+    const operation = args[0];
+
+    if (typeof operation === 'function') {
+      const callback =
+        operation as (
+          tx: typeof prismaMock,
+        ) => Promise<unknown>;
+
+      return callback(prismaMock);
+    }
+
+    if (Array.isArray(operation)) {
+      return Promise.all(operation);
+    }
+
+    throw new Error(
+      'Unsupported Prisma transaction mock.',
     );
+  },
+);
+
+prismaMock.$queryRaw.mockImplementation(
+  async (...args: unknown[]) => {
+    const strings =
+      args[0] as TemplateStringsArray;
+
+    const sql = strings.join(' ');
+
+    if (sql.includes('clock_timestamp()')) {
+      return [
+        {
+          now: new Date(),
+        },
+      ];
+    }
+
+    if (sql.includes('"ClubMembershipSettings"')) {
+      return [];
+    }
+
+    if (sql.includes('"Club"')) {
+      return [
+        {
+          id: 'club-1',
+        },
+      ];
+    }
+
+    throw new Error(
+      `Unexpected raw SQL in club service test: ${sql}`,
+    );
+  },
+);
+
+prismaMock.membershipApplication.findMany.mockResolvedValue(
+  [] as never,
+);
+
+prismaMock.membershipApplication.updateMany.mockResolvedValue(
+  { count: 0 } as never,
+);
 
     prismaMock.club.findMany.mockResolvedValue(clubs as never);
     prismaMock.club.count.mockResolvedValue(5 as never);
@@ -257,28 +334,65 @@ describe('Sprint 3.3 - Archive clubs', () => {
   const clubId = 'club-1';
 
   it('archives an active club', async () => {
-    prismaMock.club.updateMany.mockResolvedValue({ count: 1 } as never);
+  prismaMock.club.updateMany.mockResolvedValue({
+    count: 1,
+  } as never);
 
-    prismaMock.club.findUnique.mockResolvedValue({
+  prismaMock.club.findUnique
+    .mockResolvedValueOnce({
+      status: 'ACTIVE',
+    } as never)
+    .mockResolvedValueOnce({
       id: clubId,
+
       name: 'Engineering Club',
+
       status: 'ARCHIVED',
     } as never);
 
-    const result = await service.archive(clubId);
+  const result =
+    await service.archive(clubId);
 
-    expect(prismaMock.club.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: clubId,
-        status: 'ACTIVE',
-      },
-      data: {
-        status: 'ARCHIVED',
-      },
-    });
+  expect(
+    prismaMock.club.updateMany,
+  ).toHaveBeenCalledWith({
+    where: {
+      id: clubId,
 
-    expect(result.status).toBe('ARCHIVED');
+      status: 'ACTIVE',
+    },
+
+    data: {
+      status: 'ARCHIVED',
+    },
   });
+
+  expect(result.status).toBe('ARCHIVED');
+
+  expect(
+    prismaMock.membershipApplication.findMany,
+  ).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: expect.objectContaining({
+        clubId,
+
+        kind: 'ORDINARY',
+      }),
+    }),
+  );
+
+  expect(
+    prismaMock.membershipApplication.findMany,
+  ).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: expect.objectContaining({
+        clubId,
+
+        kind: 'BOARD_ONBOARDING',
+      }),
+    }),
+  );
+});
 
   it('rejects archiving an already archived club', async () => {
     prismaMock.club.updateMany.mockResolvedValue({ count: 0 } as never);

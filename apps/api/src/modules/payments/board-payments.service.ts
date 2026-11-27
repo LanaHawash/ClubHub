@@ -28,6 +28,10 @@ import {
   BoardPaymentConfirmationService,
 } from './board-payment-confirmation.service';
 
+import {
+  reconcileApplicationById,
+} from '../../shared/membership/membership-lifecycle';
+
 @Injectable()
 export class BoardPaymentsService {
   constructor(
@@ -350,6 +354,36 @@ export class BoardPaymentsService {
       };
     }
 
+    const pendingApplications =
+  await this.prisma.membershipApplication.findMany({
+    where: {
+      clubId,
+
+      kind: 'BOARD_ONBOARDING',
+
+      status: {
+        in: [
+          'PENDING_PAYMENT',
+          'PAYMENT_PROCESSING',
+        ],
+      },
+    },
+
+    select: {
+      id: true,
+    },
+  });
+
+for (const application of pendingApplications) {
+  await reconcileApplicationById(
+    this.prisma,
+    application.id,
+  );
+}
+
+await this.assertActiveDeanship(
+  deanshipAccountId,
+);
     const clock =
       await this.prisma.$queryRaw<
         { now: Date }[]

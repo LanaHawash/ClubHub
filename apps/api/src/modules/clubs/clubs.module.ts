@@ -18,6 +18,13 @@ import { PublicClubLeadershipController } from './public-club-leadership.control
 import { MembershipWindowReconcilerService } from './membership-window-reconciler.service';
 
 import { ClubImagesController } from './club-images.controller';
+import {
+  BoardNominationsController,
+} from './board-nominations.controller';
+
+import {
+  BoardNominationsService,
+} from './board-nominations.service';
 
 @Module({
   imports: [
@@ -25,26 +32,32 @@ import { ClubImagesController } from './club-images.controller';
     JwtModule.register({}),
   ],
 
-  controllers: [
-    ClubsController,
-    BoardAppointmentsController,
-    PublicClubLeadershipController,
-    ClubImagesController,
-  ],
+ controllers: [
+  ClubsController,
+  BoardAppointmentsController,
+  PublicClubLeadershipController,
+  ClubImagesController,
+
+  BoardNominationsController,
+],
 
   providers: [
-    ClubsService,
-    ClubAdminAssignmentsService,
-    ClubEligibilityService,
-    BoardAppointmentsService,
-    MembershipWindowReconcilerService,
-  ],
+  ClubsService,
+  ClubAdminAssignmentsService,
+  ClubEligibilityService,
+  BoardAppointmentsService,
+  MembershipWindowReconcilerService,
+
+  BoardNominationsService,
+],
 
   exports: [
-    ClubsService,
-    ClubAdminAssignmentsService,
-    ClubEligibilityService,
-    BoardAppointmentsService,
-  ],
+  ClubsService,
+  ClubAdminAssignmentsService,
+  ClubEligibilityService,
+  BoardAppointmentsService,
+
+  BoardNominationsService,
+],
 })
 export class ClubsModule {}

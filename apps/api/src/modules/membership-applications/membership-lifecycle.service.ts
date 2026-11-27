@@ -168,38 +168,65 @@ export class MembershipLifecycleService
     const applications =
       await this.prisma.membershipApplication.findMany({
         where: {
-          kind: 'ORDINARY',
+  OR: [
+    /*
+     * Ordinary applications retain their existing
+     * deadline and online grace behavior.
+     */
+    {
+      kind: 'ORDINARY',
+
+      OR: [
+        {
+          status: 'PENDING_PAYMENT',
+
+          paymentDeadlineAt: {
+            lte: now,
+          },
+        },
+
+        {
+          status: 'PAYMENT_PROCESSING',
 
           OR: [
             {
-              status: 'PENDING_PAYMENT',
-
-              paymentDeadlineAt: {
+              processingGraceEndsAt: {
                 lte: now,
               },
             },
 
             {
-              status: 'PAYMENT_PROCESSING',
+              processingGraceEndsAt: null,
 
-              OR: [
-                {
-                  processingGraceEndsAt: {
-                    lte: now,
-                  },
-                },
-
-                {
-                  processingGraceEndsAt: null,
-
-                  paymentDeadlineAt: {
-                    lte: now,
-                  },
-                },
-              ],
+              paymentDeadlineAt: {
+                lte: now,
+              },
             },
           ],
         },
+      ],
+    },
+
+    /*
+     * Nomination applications have a strict
+     * payment deadline without additional grace.
+     */
+    {
+      kind: 'BOARD_ONBOARDING',
+
+      status: {
+        in: [
+          'PENDING_PAYMENT',
+          'PAYMENT_PROCESSING',
+        ],
+      },
+
+      paymentDeadlineAt: {
+        lte: now,
+      },
+    },
+  ],
+},
 
         select: {
           id: true,

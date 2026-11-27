@@ -80,6 +80,14 @@ import {
   BoardPaymentConfirmationService,
 } from '../src/modules/payments/board-payment-confirmation.service';
 
+import {
+  BoardNominationsService,
+} from '../src/modules/clubs/board-nominations.service';
+
+import {
+  reconcileApplicationById,
+} from '../src/shared/membership/membership-lifecycle';
+
 describe('Sprint 6.C - Membership applications integration', () => {
   let prisma: PrismaService;
   let clubsService: ClubsService;
@@ -7993,5 +8001,964 @@ it('does not permit another nomination payment attempt following failure after t
   );
 });
 });
+
+describe('Nomination lifecycle management', () => {
+  const lifecycleService = () =>
+    new MembershipLifecycleService(prisma);
+
+  const nominationsService = () =>
+    new BoardNominationsService(prisma);
+
+  async function createLifecycleNomination(
+    mode:
+      | 'ALWAYS_OPEN'
+      | 'WINDOWED' = 'ALWAYS_OPEN',
+  ) {
+    const fixture =
+      await createBoardFixture(mode);
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    if (
+      result.outcome !== 'NOMINATION_CREATED'
+    ) {
+      throw new Error(
+        'Expected a provisional nomination.',
+      );
+    }
+
+    return {
+      ...fixture,
+
+      nomination: result.nomination,
+
+      application: result.application,
+    };
+  }
+
+  async function expireDeadline(
+    nominationId: string,
+    applicationId: string,
+    attemptId?: string,
+  ) {
+    const clock =
+      await prisma.$queryRaw<{ now: Date }[]>`
+        SELECT clock_timestamp() AS now
+      `;
+
+    const now = clock[0].now;
+
+    const deadline =
+      new Date(
+        now.getTime() - MINUTE_MS,
+      );
+
+    const nominatedAt =
+      new Date(
+        deadline.getTime() -
+          72 * 60 * MINUTE_MS,
+      );
+
+    await prisma.$transaction(async tx => {
+      await tx.boardNomination.update({
+        where: {
+          id: nominationId,
+        },
+
+        data: {
+          nominatedAt,
+
+          deadlineAt: deadline,
+        },
+      });
+
+      await tx.membershipApplication.update({
+        where: {
+          id: applicationId,
+        },
+
+        data: {
+          submittedAt: nominatedAt,
+
+          originalDeadlineAt: deadline,
+
+          paymentDeadlineAt: deadline,
+
+          processingGraceEndsAt:
+            attemptId
+              ? deadline
+              : null,
+        },
+      });
+
+      if (attemptId) {
+        await tx.paymentAttempt.update({
+          where: {
+            id: attemptId,
+          },
+
+          data: {
+            initiatedAt:
+              new Date(
+                deadline.getTime() -
+                  5 * MINUTE_MS,
+              ),
+
+            nominalDeadlineAt: deadline,
+
+            processingGraceEndsAt: deadline,
+          },
+        });
+      }
+    });
+
+    return {
+      now,
+
+      deadline,
+    };
+  }
+
+  // TEST 1
+  it('expires an unpaid nomination after its payment deadline', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await expireDeadline(
+      fixture.nomination.id,
+      fixture.application.id,
+    );
+
+    await reconcileApplicationById(
+      prisma,
+
+      fixture.application.id,
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    const application =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: fixture.application.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(nomination.expiredAt).not.toBeNull();
+
+    expect(application.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(application.endReason).toBe(
+      'NOMINATION_TIMEOUT',
+    );
+  });
+
+  // TEST 2
+  it('expires awaiting cash when the nomination deadline passes', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const cash =
+      await paymentsService.selectCashPayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    await expireDeadline(
+      fixture.nomination.id,
+      fixture.application.id,
+    );
+
+    await reconcileApplicationById(
+      prisma,
+
+      fixture.application.id,
+    );
+
+    const payment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: cash.payment.id,
+        },
+      });
+
+    expect(payment.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 3
+  it('expires unresolved online nomination payment attempts', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const online =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    await expireDeadline(
+      fixture.nomination.id,
+
+      fixture.application.id,
+
+      online.attempt.id,
+    );
+
+    await reconcileApplicationById(
+      prisma,
+
+      fixture.application.id,
+    );
+
+    const attempt =
+      await prisma.paymentAttempt.findUniqueOrThrow({
+        where: {
+          id: online.attempt.id,
+        },
+      });
+
+    const payment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: online.payment.id,
+        },
+      });
+
+    expect(attempt.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(payment.status).toBe(
+      'EXPIRED',
+    );
+
+    expect(attempt.resolvedAt).not.toBeNull();
+  });
+
+  // TEST 4
+  it('includes overdue nominations in the existing automatic reconciliation batch', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await expireDeadline(
+      fixture.nomination.id,
+
+      fixture.application.id,
+    );
+
+    await lifecycleService().reconcileDueApplications(
+      500,
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 5
+  it('does not expire a nomination before its deadline', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const result =
+      await reconcileApplicationById(
+        prisma,
+
+        fixture.application.id,
+      );
+
+    expect(result?.changed).toBe(false);
+
+    expect(result?.status).toBe(
+      'PENDING_PAYMENT',
+    );
+  });
+
+  // TEST 6
+  it('allows Deanship to withdraw an unpaid nomination', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const result =
+      await nominationsService().withdraw(
+        fixture.deanship.id,
+
+        fixture.club.id,
+
+        fixture.nomination.id,
+      );
+
+    expect(result.nomination.status).toBe(
+      'WITHDRAWN',
+    );
+
+    expect(
+      result.nomination.withdrawnAt,
+    ).not.toBeNull();
+
+    const application =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: fixture.application.id,
+        },
+      });
+
+    expect(application.status).toBe(
+      'CANCELED',
+    );
+
+    expect(application.endReason).toBe(
+      'WITHDRAWN',
+    );
+  });
+
+  // TEST 7
+  it('makes nomination withdrawal idempotent', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const first =
+      await nominationsService().withdraw(
+        fixture.deanship.id,
+
+        fixture.club.id,
+
+        fixture.nomination.id,
+      );
+
+    const repeated =
+      await nominationsService().withdraw(
+        fixture.deanship.id,
+
+        fixture.club.id,
+
+        fixture.nomination.id,
+      );
+
+    expect(first.alreadyWithdrawn).toBe(false);
+
+    expect(repeated.alreadyWithdrawn).toBe(true);
+
+    expect(
+      repeated.nomination.withdrawnAt,
+    ).toEqual(
+      first.nomination.withdrawnAt,
+    );
+  });
+
+  // TEST 8
+  it('prevents a student from withdrawing a nomination', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await expect(
+      nominationsService().withdraw(
+        fixture.account.id,
+
+        fixture.club.id,
+
+        fixture.nomination.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  // TEST 9
+  it('does not allow a qualified nomination to be withdrawn', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const online =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        online.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    await expect(
+      nominationsService().withdraw(
+        fixture.deanship.id,
+
+        fixture.club.id,
+
+        fixture.nomination.id,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+
+      response: {
+        code:
+          'NOMINATION_ALREADY_QUALIFIED',
+      },
+    });
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  // TEST 10
+  it('expires cash payment when Deanship withdraws the nomination', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const cash =
+      await paymentsService.selectCashPayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    await nominationsService().withdraw(
+      fixture.deanship.id,
+
+      fixture.club.id,
+
+      fixture.nomination.id,
+    );
+
+    const payment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: cash.payment.id,
+        },
+      });
+
+    expect(payment.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 11
+  it('permanently invalidates unpaid nominations when a club is archived', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await clubsService.archive(
+      fixture.club.id,
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    const application =
+      await prisma.membershipApplication.findUniqueOrThrow({
+        where: {
+          id: fixture.application.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'WITHDRAWN',
+    );
+
+    expect(application.status).toBe(
+      'CANCELED',
+    );
+
+    expect(application.endReason).toBe(
+      'CLUB_ARCHIVED',
+    );
+  });
+
+  // TEST 12
+  it('does not restore nominations when an archived club is reactivated', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await clubsService.archive(
+      fixture.club.id,
+    );
+
+    await clubsService.activate(
+      fixture.club.id,
+    );
+
+    await expect(
+      paymentsService.selectCashPayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(nomination.status).toBe(
+      'WITHDRAWN',
+    );
+  });
+
+  // TEST 13
+  it('records refund reconciliation for online success after nomination withdrawal', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const online =
+      await onlinePaymentsService.initiateOnlinePayment(
+        fixture.account.id,
+
+        fixture.application.id,
+      );
+
+    await nominationsService().withdraw(
+      fixture.deanship.id,
+
+      fixture.club.id,
+
+      fixture.nomination.id,
+    );
+
+    await providerEventsService.processSignedEvent(
+      await createOnlineProviderEvent(
+        online.attempt.id,
+
+        'SUCCEEDED',
+      ),
+    );
+
+    const payment =
+      await prisma.payment.findUniqueOrThrow({
+        where: {
+          id: online.payment.id,
+        },
+      });
+
+    const nomination =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(payment.status).toBe(
+      'REFUND_REQUIRED',
+    );
+
+    expect(nomination.status).toBe(
+      'WITHDRAWN',
+    );
+
+    expect(
+      await prisma.membership.count({
+        where: {
+          sourceApplicationId:
+            fixture.application.id,
+        },
+      }),
+    ).toBe(0);
+  });
+
+  // TEST 14
+  it('allows a replacement nomination after the original nomination expires', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await expireDeadline(
+      fixture.nomination.id,
+
+      fixture.application.id,
+    );
+
+    /*
+     * Do not manually reconcile here.
+     * Board creation must release stale reservations.
+     */
+    const replacement =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    expect(replacement.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    expect(replacement.nomination?.id).not.toBe(
+      fixture.nomination.id,
+    );
+
+    const original =
+      await prisma.boardNomination.findUniqueOrThrow({
+        where: {
+          id: fixture.nomination.id,
+        },
+      });
+
+    expect(original.status).toBe(
+      'EXPIRED',
+    );
+  });
+
+  // TEST 15
+  it('allows a replacement nomination after withdrawal', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await nominationsService().withdraw(
+      fixture.deanship.id,
+
+      fixture.club.id,
+
+      fixture.nomination.id,
+    );
+
+    const replacement =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    expect(replacement.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    expect(replacement.nomination?.id).not.toBe(
+      fixture.nomination.id,
+    );
+  });
+
+  // TEST 16
+  it('returns only the authenticated student nominations', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    const other =
+      await createLifecycleNomination();
+
+    const result =
+      await nominationsService().findMyNominations(
+        fixture.account.id,
+      );
+
+    expect(result.total).toBe(1);
+
+    expect(result.nominations[0].id).toBe(
+      fixture.nomination.id,
+    );
+
+    expect(result.nominations[0].id).not.toBe(
+      other.nomination.id,
+    );
+
+    expect(
+      result.nominations[0].application?.quotedAmount,
+    ).toBe('30.00');
+  });
+
+  // TEST 17
+  it('reconciles expired nominations before returning student nomination data', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await expireDeadline(
+      fixture.nomination.id,
+
+      fixture.application.id,
+    );
+
+    const result =
+      await nominationsService().findMyNominations(
+        fixture.account.id,
+      );
+
+    expect(result.nominations[0].status).toBe(
+      'EXPIRED',
+    );
+
+    expect(
+      result.nominations[0].application?.status,
+    ).toBe('EXPIRED');
+  });
+
+  // TEST 18
+  it('returns nomination history to Deanship', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await nominationsService().withdraw(
+      fixture.deanship.id,
+
+      fixture.club.id,
+
+      fixture.nomination.id,
+    );
+
+    await fixture.boardService.create(
+      fixture.club.id,
+
+      fixture.dto,
+
+      fixture.deanship.id,
+    );
+
+    const result =
+      await nominationsService().findAllForClub(
+        fixture.deanship.id,
+
+        fixture.club.id,
+      );
+
+    expect(result.total).toBe(2);
+
+    expect(
+      result.nominations.map(
+        nomination => nomination.status,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        'WITHDRAWN',
+        'PENDING_PAYMENT',
+      ]),
+    );
+  });
+
+  // TEST 19
+  it('prevents ordinary students from accessing Deanship nomination management', async () => {
+    const fixture =
+      await createLifecycleNomination();
+
+    await expect(
+      nominationsService().findAllForClub(
+        fixture.account.id,
+
+        fixture.club.id,
+      ),
+    ).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  // TEST 20
+  it('exposes a pending board nomination independently of an active membership', async () => {
+    const fixture =
+      await createBoardFixture();
+
+    await prisma.membership.create({
+      data: {
+        clubId: fixture.club.id,
+
+        studentId: fixture.student.id,
+
+        activatedAt:
+          new Date(
+            Date.now() -
+              335 * DAY_MS,
+          ),
+
+        expiresAt:
+          new Date(
+            Date.now() +
+              30 * DAY_MS,
+          ),
+      },
+    });
+
+    const result =
+      await fixture.boardService.create(
+        fixture.club.id,
+
+        fixture.dto,
+
+        fixture.deanship.id,
+      );
+
+    expect(result.outcome).toBe(
+      'NOMINATION_CREATED',
+    );
+
+    const quote =
+      await clubsService.getMembershipQuoteForAccount(
+        fixture.account.id,
+
+        fixture.club.id,
+
+        true,
+      );
+
+    expect(quote.action).toBe(
+      'ACTIVE_MEMBER',
+    );
+
+    expect(
+      quote.hasPendingBoardNomination,
+    ).toBe(true);
+
+    expect(
+      quote.pendingBoardNomination?.id,
+    ).toBe(
+      result.nomination?.id,
+    );
+  });
+
+// TEST 21
+it('preserves a board nomination when ordinary registration mode changes', async () => {
+  const fixture =
+    await createLifecycleNomination(
+      'ALWAYS_OPEN',
+    );
+
+  const settings =
+    await prisma.clubMembershipSettings.findUniqueOrThrow({
+      where: {
+        clubId: fixture.club.id,
+      },
+    });
+
+  await clubsService.updateMembershipMode(
+    fixture.club.id,
+
+    {
+      registrationMode: 'WINDOWED',
+
+      configVersion:
+        settings.configVersion,
+    },
+  );
+
+  const nomination =
+    await prisma.boardNomination.findUniqueOrThrow({
+      where: {
+        id: fixture.nomination.id,
+      },
+    });
+
+  const application =
+    await prisma.membershipApplication.findUniqueOrThrow({
+      where: {
+        id: fixture.application.id,
+      },
+    });
+
+  expect(nomination.status).toBe(
+    'PENDING_PAYMENT',
+  );
+
+  expect(application.status).toBe(
+    'PENDING_PAYMENT',
+  );
+
+  const cash =
+    await paymentsService.selectCashPayment(
+      fixture.account.id,
+
+      fixture.application.id,
+    );
+
+  expect(cash.payment.status).toBe(
+    'AWAITING_CASH',
+  );
 });
+
+// TEST 22
+it('does not modify a qualified nomination during lifecycle reconciliation', async () => {
+  const fixture =
+    await createLifecycleNomination();
+
+  const online =
+    await onlinePaymentsService.initiateOnlinePayment(
+      fixture.account.id,
+
+      fixture.application.id,
+    );
+
+  await providerEventsService.processSignedEvent(
+    await createOnlineProviderEvent(
+      online.attempt.id,
+
+      'SUCCEEDED',
+    ),
+  );
+
+  const result =
+    await reconcileApplicationById(
+      prisma,
+
+      fixture.application.id,
+    );
+
+  expect(result?.changed).toBe(false);
+
+  expect(result?.status).toBe('PAID');
+
+  const nomination =
+    await prisma.boardNomination.findUniqueOrThrow({
+      where: {
+        id: fixture.nomination.id,
+      },
+    });
+
+  expect(nomination.status).toBe(
+    'QUALIFIED',
+  );
+
+  expect(
+    nomination.boardAppointmentId,
+  ).not.toBeNull();
 });
+
+}); // Nomination lifecycle management
+
+}); // Direct appointments and provisional nominations
+
+}); // Sprint 6.C - Membership applications integration

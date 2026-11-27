@@ -23,6 +23,9 @@ import {
   lockStudentClubMembership,
   getMembershipTransactionTime,
 } from './membership-lock';
+import {
+  reconcileBoardNominationApplication,
+} from './board-nomination-lifecycle';
 
 export interface LifecycleReconciliationResult {
   applicationId: string;
@@ -921,12 +924,9 @@ export async function reconcileApplicationById(
   }
 
   if (
-    initial.kind !== 'ORDINARY' ||
-    (
-      initial.status !== 'PENDING_PAYMENT' &&
-      initial.status !== 'PAYMENT_PROCESSING'
-    )
-  ) {
+  initial.status !== 'PENDING_PAYMENT' &&
+  initial.status !== 'PAYMENT_PROCESSING'
+) {
     return {
       applicationId: initial.id,
       changed: false,
@@ -974,11 +974,19 @@ export async function reconcileApplicationById(
     const now =
       await getMembershipTransactionTime(tx);
 
-    return reconcileOrdinaryApplication(
-      tx,
-      current,
-      now,
-    );
+    if (current.kind === 'BOARD_ONBOARDING') {
+  return reconcileBoardNominationApplication(
+    tx,
+    current,
+    now,
+  );
+}
+
+return reconcileOrdinaryApplication(
+  tx,
+  current,
+  now,
+);
   });
 }
 
@@ -996,7 +1004,7 @@ export async function reconcileStudentClubApplications(
       where: {
         studentId,
         clubId,
-        kind: 'ORDINARY',
+        
 
         status: {
           in: [

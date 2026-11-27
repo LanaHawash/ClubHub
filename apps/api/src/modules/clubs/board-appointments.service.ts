@@ -40,6 +40,9 @@ import {
   lockStudentClubMembership,
   getMembershipTransactionTime,
 } from '../../shared/membership/membership-lock';
+import {
+  reconcileStudentClubApplications,
+} from '../../shared/membership/membership-lifecycle';
 
 @Injectable()
 export class BoardAppointmentsService {
@@ -97,11 +100,46 @@ export class BoardAppointmentsService {
     return this.prisma.boardAppointment.findMany({ where: { clubId }, select: this.projection, orderBy: [{ startDate: 'desc' }, { id: 'asc' }] });
   }
   async create(
-  clubId: string,
-  dto: CreateBoardAppointmentDto,
-  nominatedById: string,
-) {
-  return this.prisma.$transaction(async (tx) => {
+    clubId: string,
+    dto: CreateBoardAppointmentDto,
+    nominatedById: string,
+  ) {
+    /*
+    * Authorize before performing lifecycle reconciliation.
+    */
+    const actor =
+      await this.prisma.account.findUnique({
+        where: {
+          id: nominatedById,
+        },
+
+        select: {
+          role: true,
+          status: true,
+        },
+      });
+
+    if (
+      !actor ||
+      actor.role !== 'DEANSHIP' ||
+      actor.status !== 'ACTIVE'
+    ) {
+      throw new ForbiddenException(
+        'Only active Deanship accounts can create board appointments.',
+      );
+    }
+
+    /*
+    * Persist any already-expired applications before
+    * attempting to reserve a new nomination.
+    */
+    await reconcileStudentClubApplications(
+      this.prisma,
+      dto.studentId,
+      clubId,
+    );
+
+    return this.prisma.$transaction(async (tx) => {
     await lockMembershipClub(
       tx,
       clubId,

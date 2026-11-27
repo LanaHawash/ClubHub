@@ -39,6 +39,9 @@ import {
 import {
   reconcileStudentClubApplications,
 } from '../../shared/membership/membership-lifecycle';
+import {
+  withdrawClubBoardNominations,
+} from '../../shared/membership/board-nomination-lifecycle';
 
 @Injectable()
 export class ClubsService {
@@ -1067,6 +1070,29 @@ async getMembershipQuoteForAccount(
           currentPayment?.status ?? null,
       }
     : null;
+    const pendingBoardNomination =
+  liveApplication?.kind === 'BOARD_ONBOARDING' &&
+  liveApplication.boardNominationId
+    ? await this.prisma.boardNomination.findUnique({
+        where: {
+          id: liveApplication.boardNominationId,
+        },
+
+        select: {
+          id: true,
+
+          position: true,
+
+          status: true,
+
+          proposedStartDate: true,
+
+          proposedEndDate: true,
+
+          deadlineAt: true,
+        },
+      })
+    : null;
 
   const action = resolveMembershipAction({
     academicallyEligible,
@@ -1143,6 +1169,11 @@ async getMembershipQuoteForAccount(
     pendingApplication,
 
     activeMembership,
+
+    pendingBoardNomination,
+
+hasPendingBoardNomination:
+  Boolean(pendingBoardNomination),
   };
 }
 async getMembershipAvailability(
@@ -2702,6 +2733,11 @@ async archive(id: string) {
       id,
       now,
       'CLUB_ARCHIVED',
+    );
+    await withdrawClubBoardNominations(
+      tx,
+      id,
+      now,
     );
   });
 
